@@ -1,0 +1,108 @@
+# ProtoNet Drawing Recognition - Configuration
+# This config supports hybrid mode with easy upgrade path to online learning
+
+# Data Configuration
+data:
+  dataset: "quickdraw"
+  data_path: "data/quickdraw"
+  image_size: 64
+  num_channels: 1
+  
+  # Episode Configuration (Meta-Learning)
+  n_way: 10  # Number of classes per episode (higher = better generalization)
+  n_support: 5  # Shots per class in support set
+  n_query: 10  # Queries per class
+  
+  # Augmentation
+  augmentation:
+    enabled: true
+    rotation_degrees: 15
+    scale_range: [0.9, 1.1]
+    elastic_deformation: false
+
+# Model Configuration
+model:
+  encoder: "conv4"
+  embedding_dim: 512
+  distance_metric: "euclidean"
+  
+  # Encoder-specific parameters
+  conv4:
+    channels: [64, 128, 256, 512]
+    use_batchnorm: true
+    dropout: 0.1
+
+# Training Configuration
+training:
+  mode: "meta"  # Meta-learning mode
+  num_episodes: 15000  # Total training episodes
+  validation_episodes: 600  # Validation episodes
+  batch_size: 1  # Episodes per batch (typically 1 for meta-learning)
+  
+  # Optimization
+  optimizer: "adam"
+  learning_rate: 0.001
+  lr_scheduler: "step"
+  lr_step_size: 4000
+  lr_gamma: 0.5
+  weight_decay: 0.0005
+  
+  # Checkpointing
+  save_interval: 1000  # Save every N episodes
+  checkpoint_dir: "checkpoints"
+  
+  # Early stopping
+  patience: 3000
+  min_delta: 0.001
+
+# Evaluation Configuration
+evaluation:
+  test_episodes: 1000
+  n_way: 5
+  n_shot_variants: [1, 5, 10]  # Test multiple shot scenarios
+  visualize_embeddings: true
+  save_confusion_matrix: true
+
+# Prototype Storage Configuration (KEY FOR UPGRADES!)
+storage:
+  backend: "hybrid"  # Options: "static", "hybrid"
+  
+  # Static mode
+  pretrained_model_path: "models/pretrained_protonet.pt"
+  
+  # Hybrid mode (session-based)
+  session:
+    enabled: true
+    max_custom_classes: 50  # Limit per session
+    min_examples: 3  # Minimum examples to create prototype
+  
+  cache:
+    enabled: true
+    max_size: 1000
+
+# Inference Configuration
+inference:
+  confidence_threshold: 0.6
+  top_k: 3
+
+# Visualization Configuration
+visualization:
+  enabled: true
+  plot_every: 100  # Plot every N episodes during training
+  save_plots: true
+  plot_dir: "plots"
+  embedding_method: "tsne"  # Options: "tsne", "umap", "pca"
+
+# Logging Configuration
+logging:
+  level: "INFO"  # Options: "DEBUG", "INFO", "WARNING", "ERROR"
+  log_file: "logs/protonet.log"
+  tensorboard: true
+  tensorboard_dir: "runs"
+
+# System Configuration
+system:
+  device: "auto"  # Options: "auto", "cuda", "cpu", "mps"
+  num_workers: 4
+  seed: 42
+  deterministic: false
