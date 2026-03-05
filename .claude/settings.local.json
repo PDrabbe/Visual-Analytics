@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import os; os.makedirs\\(''dashboard/assets'', exist_ok=True\\); print\\(''done''\\)\")",
+      "Bash(python -c \"import pathlib; pathlib.Path\\(''dashboard''\\).mkdir\\(exist_ok=True\\); print\\(''done''\\)\")",
+      "Bash(cmd //c \"mkdir dashboard\")",
+      "Bash(cmd //c \"mkdir dashboard\\\\assets\")",
+      "Bash(python -c \":*)",
+      "Bash(pip install dash plotly scipy umap-learn)"
+    ]
+  }
+}
