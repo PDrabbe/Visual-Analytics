@@ -1,203 +1,185 @@
 """
 Analytics engine for the ProtoNet Visual Analytics Dashboard.
 
-Handles demo data generation, embedding computation, UMAP projection,
-prototype computation, and classification logic.
+Uses the real trained ProtoNet model to compute embeddings from
+actual QuickDraw test images.  Same public interface as before so
+all dashboard callbacks remain unchanged.
 """
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 import io
 import base64
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from scipy.spatial.distance import cdist
+import logging
 
-CLASS_NAMES = ['cat', 'dog', 'fish', 'car', 'tree', 'house', 'star', 'moon', 'flower']
-CLASS_COLORS = [
-    '#58a6ff', '#3fb950', '#d29922', '#f85149', '#bc8cff',
-    '#79c0ff', '#56d364', '#e3b341', '#ff7b72',
+logger = logging.getLogger(__name__)
+
+# ── Subset of trained classes shown in the dashboard ──────────────
+# Edit this list to show more/fewer of the 29 available classes.
+CLASS_NAMES = [
+    'cat', 'dog', 'fish', 'car', 'flower',
+    'bicycle', 'bird', 'pizza', 'clock', 'lightning',
 ]
+
+CLASS_COLORS = [
+    '#58a6ff',   # cat
+    '#3fb950',   # dog
+    '#d29922',   # fish
+    '#f85149',   # car
+    '#bc8cff',   # flower
+    '#79c0ff',   # bicycle
+    '#56d364',   # bird
+    '#e3b341',   # pizza
+    '#ff7b72',   # clock
+    '#ffa657',   # lightning
+]
+
+# ── Paths ─────────────────────────────────────────────────────────
+_ROOT = Path(__file__).resolve().parent.parent
+_CHECKPOINT = _ROOT / 'checkpoints' / 'best_model.pt'
+_DATA_DIR = _ROOT / 'data' / 'quickdraw' / 'test'
+_MAX_PER_CLASS = 40   # images to load per class (out of ~75 available)
+_INITIAL_SUPPORT = 5
 
 
 class AnalyticsEngine:
-    """Backend engine for the ProtoNet visual analytics dashboard."""
+    """Backend engine that wraps the real ProtoNet model."""
 
     def __init__(self):
         self.class_names: List[str] = list(CLASS_NAMES)
         self.n_classes: int = len(self.class_names)
-        self.class_colors: List[str] = list(CLASS_COLORS[: self.n_classes])
+        self.class_colors: List[str] = list(CLASS_COLORS[:self.n_classes])
 
         self.images: List[np.ndarray] = []
         self.labels: np.ndarray = np.array([], dtype=int)
-        self.embeddings_hd: Optional[np.ndarray] = None
-        self.embeddings_2d: Optional[np.ndarray] = None
-
-        self.embedding_dim = 64
-        self.n_per_class = 80
-        self.initial_support = 5
-        self.image_size = 28
+        self.embeddings_hd: Optional[np.ndarray] = None   # (N, 512)
+        self.embeddings_2d: Optional[np.ndarray] = None    # (N, 2)
+        self.default_support: Dict[str, list] = {}
 
     # ------------------------------------------------------------------
-    # Initialization
+    # Initialisation — loads real model, images, computes embeddings
     # ------------------------------------------------------------------
 
     def init_demo(self) -> "AnalyticsEngine":
-        """Generate synthetic demo data."""
-        rng = np.random.RandomState(42)
+        """Load real model & QuickDraw data, compute embeddings, run UMAP."""
+        import torch
+        import torchvision.transforms as T
+        from models.encoder import get_encoder
 
+        # ── load checkpoint ───────────────────────────────────────
+        cp = torch.load(str(_CHECKPOINT), map_location='cpu', weights_only=False)
+
+        encoder = get_encoder(
+            encoder_type='conv4',
+            config={
+                'num_channels': 1,
+                'embedding_dim': 512,
+                'conv4': {
+                    'channels': [64, 128, 256, 512],
+                    'use_batchnorm': True,
+                    'dropout': 0.1,
+                },
+            },
+        )
+        # Extract encoder weights from the full ProtoNet state dict
+        if 'model_state_dict' in cp:
+            sd = {
+                k.replace('encoder.', '', 1): v
+                for k, v in cp['model_state_dict'].items()
+                if k.startswith('encoder.')
+            }
+            encoder.load_state_dict(sd, strict=True)
+        elif 'encoder_state_dict' in cp:
+            encoder.load_state_dict(cp['encoder_state_dict'])
+        encoder.eval()
+
+        transform = T.Compose([
+            T.Resize((64, 64)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.5], std=[0.5]),
+        ])
+
+        # ── load images ──────────────────────────────────────────
         self.images = []
-        labels = []
-        for ci, cname in enumerate(self.class_names):
-            for i in range(self.n_per_class):
-                img = self._generate_sketch(cname, seed=ci * 10000 + i)
-                self.images.append(img)
-                labels.append(ci)
-        self.labels = np.array(labels, dtype=int)
+        labels: List[int] = []
 
-        self._generate_embeddings(rng)
+        for ci, cname in enumerate(self.class_names):
+            cls_dir = _DATA_DIR / cname
+            if not cls_dir.exists():
+                logger.warning("Class directory not found: %s", cls_dir)
+                continue
+            img_files = sorted(cls_dir.glob('*.png'))[:_MAX_PER_CLASS]
+            for f in img_files:
+                arr = np.array(Image.open(f).convert('L'))
+                self.images.append(arr)
+                labels.append(ci)
+
+        self.labels = np.array(labels, dtype=int)
+        n = len(self.images)
+        logger.info("Loaded %d images across %d classes", n, self.n_classes)
+
+        # ── compute embeddings with real encoder ──────────────────
+        all_embs: List[np.ndarray] = []
+        batch_size = 64
+        with torch.no_grad():
+            for i in range(0, n, batch_size):
+                batch_imgs = self.images[i:i + batch_size]
+                tensors = torch.stack([
+                    transform(Image.fromarray(img.astype(np.uint8), mode='L'))
+                    for img in batch_imgs
+                ])
+                embs = encoder(tensors)           # (B, 512)
+                all_embs.append(embs.cpu().numpy())
+
+        self.embeddings_hd = np.concatenate(all_embs, axis=0)
+
+        # ── UMAP / t-SNE for 2-D scatter ────────────────────────
         self._compute_umap()
 
-        support_config: Dict[str, list] = {}
+        # ── default support set (first K per class) ──────────────
+        self.default_support = {}
         for ci, cname in enumerate(self.class_names):
-            idxs = np.where(self.labels == ci)[0][: self.initial_support].tolist()
-            support_config[cname] = [{"idx": idx, "weight": 1.0} for idx in idxs]
-        self.default_support = support_config
+            idxs = np.where(self.labels == ci)[0][:_INITIAL_SUPPORT].tolist()
+            self.default_support[cname] = [
+                {'idx': idx, 'weight': 1.0} for idx in idxs
+            ]
+
         return self
 
     # ------------------------------------------------------------------
-    # Sketch generation
+    # UMAP
     # ------------------------------------------------------------------
-
-    def _generate_sketch(self, class_name: str, seed: int) -> np.ndarray:
-        rng = np.random.RandomState(seed)
-        sz = self.image_size
-        img = Image.new("L", (sz, sz), 255)
-        draw = ImageDraw.Draw(img)
-        ox, oy = rng.randint(-2, 3), rng.randint(-2, 3)
-        s = 1.0 + rng.uniform(-0.15, 0.15)
-        cx, cy = sz // 2 + ox, sz // 2 + oy
-
-        if class_name == "cat":
-            r = int(7 * s)
-            draw.ellipse([cx - r, cy - r + 2, cx + r, cy + r + 2], outline=0, width=1)
-            draw.polygon(
-                [(cx - r + 1, cy - r + 2), (cx - r - 1, cy - r - 4), (cx - r + 5, cy - r + 2)],
-                outline=0,
-            )
-            draw.polygon(
-                [(cx + r - 1, cy - r + 2), (cx + r + 1, cy - r - 4), (cx + r - 5, cy - r + 2)],
-                outline=0,
-            )
-            draw.ellipse([cx - 4, cy - 1, cx - 2, cy + 1], fill=0)
-            draw.ellipse([cx + 2, cy - 1, cx + 4, cy + 1], fill=0)
-
-        elif class_name == "dog":
-            r = int(7 * s)
-            draw.ellipse([cx - r, cy - r + 2, cx + r, cy + r + 2], outline=0, width=1)
-            draw.ellipse([cx - r - 2, cy - 2, cx - r + 3, cy + 6], outline=0, width=1)
-            draw.ellipse([cx + r - 3, cy - 2, cx + r + 2, cy + 6], outline=0, width=1)
-            draw.ellipse([cx - 3, cy, cx - 1, cy + 2], fill=0)
-            draw.ellipse([cx + 1, cy, cx + 3, cy + 2], fill=0)
-            draw.ellipse([cx - 1, cy + 3, cx + 1, cy + 5], fill=0)
-
-        elif class_name == "fish":
-            rw, rh = int(9 * s), int(5 * s)
-            draw.ellipse([cx - rw, cy - rh, cx + rw, cy + rh], outline=0, width=1)
-            draw.polygon([(cx + rw - 1, cy), (cx + rw + 5, cy - 4), (cx + rw + 5, cy + 4)], outline=0)
-            draw.ellipse([cx - rw + 3, cy - 2, cx - rw + 5, cy], fill=0)
-
-        elif class_name == "car":
-            w, h = int(10 * s), int(5 * s)
-            draw.rectangle([cx - w, cy - h + 3, cx + w, cy + h], outline=0, width=1)
-            draw.rectangle([cx - 5, cy - h - 2, cx + 5, cy - h + 3], outline=0, width=1)
-            draw.ellipse([cx - w + 1, cy + h - 2, cx - w + 5, cy + h + 2], outline=0, fill=0)
-            draw.ellipse([cx + w - 5, cy + h - 2, cx + w - 1, cy + h + 2], outline=0, fill=0)
-
-        elif class_name == "tree":
-            draw.rectangle([cx - 2, cy + 2, cx + 2, cy + 10], outline=0, fill=0)
-            draw.polygon([(cx, cy - 10), (cx - 8, cy + 2), (cx + 8, cy + 2)], outline=0, width=1)
-
-        elif class_name == "house":
-            w, h = int(8 * s), int(6 * s)
-            draw.rectangle([cx - w, cy - h + 4, cx + w, cy + h + 2], outline=0, width=1)
-            draw.polygon([(cx - w - 2, cy - h + 4), (cx, cy - h - 5), (cx + w + 2, cy - h + 4)], outline=0, width=1)
-            draw.rectangle([cx - 2, cy + h - 2, cx + 2, cy + h + 2], outline=0, width=1)
-
-        elif class_name == "star":
-            r_out, r_in = int(9 * s), int(4 * s)
-            pts = []
-            for i in range(10):
-                a = np.pi / 2 + i * np.pi / 5
-                r = r_out if i % 2 == 0 else r_in
-                pts.append((cx + int(r * np.cos(a)), cy - int(r * np.sin(a))))
-            draw.polygon(pts, outline=0, width=1)
-
-        elif class_name == "moon":
-            r = int(8 * s)
-            draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=0, width=1)
-            r2 = int(7 * s)
-            draw.ellipse([cx - r2 + 4, cy - r2, cx + r2 + 4, cy + r2], fill=255, outline=255)
-            draw.arc([cx - r, cy - r, cx + r, cy + r], 0, 360, fill=0, width=1)
-
-        elif class_name == "flower":
-            r = int(3 * s)
-            draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=0, fill=0)
-            for a in np.linspace(0, 2 * np.pi, 6, endpoint=False):
-                px = cx + int(6 * s * np.cos(a))
-                py = cy + int(6 * s * np.sin(a))
-                pr = int(3 * s)
-                draw.ellipse([px - pr, py - pr, px + pr, py + pr], outline=0, width=1)
-            draw.line([(cx, cy + int(6 * s)), (cx, cy + 12)], fill=0, width=1)
-
-        return np.array(img)
-
-    # ------------------------------------------------------------------
-    # Embeddings
-    # ------------------------------------------------------------------
-
-    def _generate_embeddings(self, rng: np.random.RandomState):
-        n = len(self.labels)
-        D = self.embedding_dim
-        centroids = rng.randn(self.n_classes, D) * 1.5
-        # Make similar classes overlap heavily
-        centroids[1] = centroids[0] + rng.randn(D) * 0.5   # dog~cat (high overlap)
-        centroids[8] = centroids[6] + rng.randn(D) * 0.6   # flower~star
-        centroids[3] = centroids[5] + rng.randn(D) * 0.6   # car~house
-        centroids[7] = centroids[8] + rng.randn(D) * 0.7   # moon~flower
-        centroids[2] = centroids[7] + rng.randn(D) * 0.9   # fish~moon
-
-        emb = np.zeros((n, D))
-        for i in range(n):
-            noise = 1.2 + rng.uniform(0, 1.2)
-            emb[i] = centroids[self.labels[i]] + rng.randn(D) * noise
-        self.embeddings_hd = emb
 
     def _compute_umap(self):
         try:
             from umap import UMAP
-            reducer = UMAP(n_components=2, random_state=42, n_neighbors=15, min_dist=0.3)
+            reducer = UMAP(n_components=2, random_state=42,
+                           n_neighbors=15, min_dist=0.3)
         except ImportError:
             from sklearn.manifold import TSNE
             reducer = TSNE(n_components=2, random_state=42, perplexity=30)
         self.embeddings_2d = reducer.fit_transform(self.embeddings_hd)
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Image helpers
     # ------------------------------------------------------------------
 
     def image_to_base64(self, idx: int, size: int = 56) -> str:
         arr = self.images[idx]
-        img = Image.fromarray(arr.astype(np.uint8), mode="L")
+        img = Image.fromarray(arr.astype(np.uint8), mode='L')
         img = img.resize((size, size), Image.NEAREST)
         buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        img.save(buf, format='PNG')
+        return 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
 
     def support_indices(self, sc: Dict) -> set:
         out: set = set()
         for items in sc.values():
             for item in items:
-                out.add(item["idx"])
+                out.add(item['idx'])
         return out
 
     def query_mask(self, sc: Dict) -> np.ndarray:
@@ -205,7 +187,7 @@ class AnalyticsEngine:
         return np.array([i not in si for i in range(len(self.labels))])
 
     # ------------------------------------------------------------------
-    # Prototype computation
+    # Prototype computation (HD for accuracy, 2D for scatter)
     # ------------------------------------------------------------------
 
     def compute_prototypes(
@@ -217,8 +199,8 @@ class AnalyticsEngine:
             items = sc.get(cname, [])
             if not items:
                 continue
-            idxs = [it["idx"] for it in items]
-            wts = np.array([it["weight"] for it in items])
+            idxs = [it['idx'] for it in items]
+            wts = np.array([it['weight'] for it in items])
             wts = wts / wts.sum()
             order.append(cname)
             p2d.append(np.average(self.embeddings_2d[idxs], axis=0, weights=wts))
@@ -226,7 +208,7 @@ class AnalyticsEngine:
         return np.array(p2d), np.array(phd), order
 
     # ------------------------------------------------------------------
-    # Classification
+    # Classification (uses HD embeddings for real model accuracy)
     # ------------------------------------------------------------------
 
     def classify(
@@ -239,24 +221,24 @@ class AnalyticsEngine:
         if not order:
             return self._empty_result()
 
-        # Apply 2D overrides
+        # 2D overrides only affect the scatter; HD prototypes stay real
         if proto_overrides:
             for cname, pos in proto_overrides.items():
                 if cname in order:
                     p2d[order.index(cname)] = pos
 
         qm = self.query_mask(sc)
-        q2d = self.embeddings_2d[qm]
+        qhd = self.embeddings_hd[qm]
         qlabels = self.labels[qm]
         qidxs = np.where(qm)[0]
 
-        dists = cdist(q2d, p2d, metric="euclidean")
+        # Classify using *high-dimensional* distances (real model behaviour)
+        dists = cdist(qhd, phd, metric='euclidean')
         temp = max(temperature, 0.01)
         logits = -dists / temp
         logits -= logits.max(axis=1, keepdims=True)
         probs = np.exp(logits)
         probs /= probs.sum(axis=1, keepdims=True)
-
         preds = np.argmax(probs, axis=1)
 
         name2idx = {n: i for i, n in enumerate(order)}
@@ -279,40 +261,41 @@ class AnalyticsEngine:
         overall = sum(cm[i, i] for i in range(nc)) / total if total > 0 else 0.0
 
         return {
-            "preds": preds,
-            "true_idx": true_idx,
-            "probs": probs,
-            "dists": dists,
-            "cm": cm,
-            "order": order,
-            "accs": accs,
-            "overall": overall,
-            "query_idxs": qidxs,
-            "p2d": p2d,
-            "phd": phd,
+            'preds': preds,
+            'true_idx': true_idx,
+            'probs': probs,
+            'dists': dists,
+            'cm': cm,
+            'order': order,
+            'accs': accs,
+            'overall': overall,
+            'query_idxs': qidxs,
+            'p2d': p2d,
+            'phd': phd,
         }
 
     def _empty_result(self):
         return {
-            "preds": np.array([]),
-            "true_idx": np.array([]),
-            "probs": np.array([]),
-            "dists": np.array([]),
-            "cm": np.array([]),
-            "order": [],
-            "accs": {},
-            "overall": 0.0,
-            "query_idxs": np.array([]),
-            "p2d": np.array([]),
-            "phd": np.array([]),
+            'preds': np.array([]),
+            'true_idx': np.array([]),
+            'probs': np.array([]),
+            'dists': np.array([]),
+            'cm': np.array([]),
+            'order': [],
+            'accs': {},
+            'overall': 0.0,
+            'query_idxs': np.array([]),
+            'p2d': np.array([]),
+            'phd': np.array([]),
         }
 
     def query_distances(self, qidx: int, sc: Dict, temperature: float = 1.0) -> Dict:
-        p2d, _, order = self.compute_prototypes(sc)
+        """Distance breakdown for a single query (HD-based)."""
+        _, phd, order = self.compute_prototypes(sc)
         if not order:
-            return {"order": [], "dists": [], "probs": [], "true": "", "pred": ""}
-        pt = self.embeddings_2d[qidx]
-        d = np.sqrt(((p2d - pt) ** 2).sum(axis=1))
+            return {'order': [], 'dists': [], 'probs': [], 'true': '', 'pred': ''}
+        pt = self.embeddings_hd[qidx]
+        d = np.sqrt(((phd - pt) ** 2).sum(axis=1))
         temp = max(temperature, 0.01)
         logits = -d / temp
         logits -= logits.max()
@@ -321,21 +304,21 @@ class AnalyticsEngine:
         true_name = self.class_names[self.labels[qidx]]
         pred_name = order[np.argmax(probs)]
         return {
-            "order": order,
-            "dists": d,
-            "probs": probs,
-            "true": true_name,
-            "pred": pred_name,
+            'order': order,
+            'dists': d,
+            'probs': probs,
+            'true': true_name,
+            'pred': pred_name,
         }
 
     # ------------------------------------------------------------------
-    # Decision boundary mesh
+    # Decision boundary mesh (2-D approximation for scatter overlay)
     # ------------------------------------------------------------------
 
     def decision_mesh(
-        self, sc: Dict, temperature: float, proto_overrides: Optional[Dict] = None, res: int = 80
+        self, sc: Dict, temperature: float,
+        proto_overrides: Optional[Dict] = None, res: int = 80,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return (xx, yy, zz) for decision boundary contour."""
         p2d, _, order = self.compute_prototypes(sc)
         if not order:
             return np.array([]), np.array([]), np.array([])
@@ -345,8 +328,10 @@ class AnalyticsEngine:
                     p2d[order.index(cn)] = pos
 
         pad = 1.5
-        xmin, xmax = self.embeddings_2d[:, 0].min() - pad, self.embeddings_2d[:, 0].max() + pad
-        ymin, ymax = self.embeddings_2d[:, 1].min() - pad, self.embeddings_2d[:, 1].max() + pad
+        xmin = self.embeddings_2d[:, 0].min() - pad
+        xmax = self.embeddings_2d[:, 0].max() + pad
+        ymin = self.embeddings_2d[:, 1].min() - pad
+        ymax = self.embeddings_2d[:, 1].max() + pad
         xs = np.linspace(xmin, xmax, res)
         ys = np.linspace(ymin, ymax, res)
         xx, yy = np.meshgrid(xs, ys)

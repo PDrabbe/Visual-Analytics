@@ -18,9 +18,9 @@ from dashboard.engine import AnalyticsEngine, CLASS_COLORS, CLASS_NAMES
 # =====================================================================
 # Engine initialisation
 # =====================================================================
-print("Initialising analytics engine (generating demo data + UMAP)...")
+print("Initialising analytics engine (loading model + QuickDraw data + UMAP)...")
 engine = AnalyticsEngine().init_demo()
-print(f"Ready: {len(engine.images)} sketches, {engine.n_classes} classes")
+print(f"Ready: {len(engine.images)} real sketches, {engine.n_classes} classes")
 
 # =====================================================================
 # Plotly template

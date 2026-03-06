@@ -51,8 +51,13 @@ def compute_prototypes(model, dataloader, device, num_samples_per_class=100):
                 embedding = model.encoder(image)
                 embeddings.append(embedding.squeeze(0).cpu())
         
-        # Compute prototype (mean of embeddings)
-        prototype = torch.stack(embeddings).mean(dim=0)
+        # L2-normalize each embedding before averaging (cosine-friendly prototypes)
+        stacked = torch.stack(embeddings)
+        stacked = torch.nn.functional.normalize(stacked, p=2, dim=1)
+        
+        # Compute prototype (mean of normalized embeddings), then re-normalize
+        prototype = stacked.mean(dim=0)
+        prototype = torch.nn.functional.normalize(prototype, p=2, dim=0)
         class_embeddings[class_name] = prototype
         
         print(f"  {class_name}: prototype computed from {len(embeddings)} samples")
@@ -121,7 +126,7 @@ def main():
         model=model,
         dataloader=train_loader,
         device=device,
-        num_samples_per_class=200  # Use 200 samples per class
+        num_samples_per_class=200  # Use 200 samples per class for robust prototypes
     )
     
     print(f"Computed {len(prototypes)} prototypes.")

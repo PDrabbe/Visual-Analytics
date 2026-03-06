@@ -5,8 +5,13 @@ import random
 
 predictor = DrawingPredictor('checkpoints/best_model.pt')
 
-# Your 9 TRAINED classes
-trained_classes = ['cat', 'dog', 'bird', 'fish', 'horse', 'apple', 'banana', 'cake', 'pizza']
+# All 29 TRAINED classes
+trained_classes = [
+    'apple', 'banana', 'bicycle', 'bird', 'bus', 'cake', 'car', 'cat',
+    'chair', 'clock', 'cloud', 'diamond', 'dog', 'door', 'eyeglasses',
+    'fish', 'flower', 'hexagon', 'horse', 'key', 'ladder', 'lightning',
+    'mountain', 'pizza', 'scissors', 'square', 'table', 'triangle', 'truck'
+]
 
 # NEW classes (not in training)
 new_classes = ['airplane', 'book', 'tree', 'house', 'umbrella', 'guitar', 'moon', 'star']
@@ -15,20 +20,29 @@ print("\n" + "="*60)
 print("HYBRID LEARNING TEST - Real QuickDraw Data")
 print("="*60)
 
-print(f"\nTrained classes: {trained_classes}")
-print(f"New classes: {new_classes}\n")
+print(f"\nTrained classes ({len(trained_classes)}): {trained_classes}")
+print(f"New classes ({len(new_classes)}): {new_classes}\n")
 
-# Test 1: Base classes still work
+# Test 1: Base classes still work (sample 8 to get broader coverage)
 print("-"*60)
 print("TEST 1: Base classes (should work perfectly)")
 print("-"*60)
 
-for class_name in random.sample(trained_classes, 3):
+correct_base = 0
+total_base = 0
+sample_size = min(8, len(trained_classes))
+for class_name in random.sample(trained_classes, sample_size):
     test_img = f'data/quickdraw/test/{class_name}/0001.png'
     if os.path.exists(test_img):
         result = predictor.predict(test_img)
-        correct = "+" if result['class'] == class_name else "-"
-        print(f"{correct} {class_name:10} -> {result['class']:10} ({result['confidence']:.1%})")
+        is_correct = result['class'] == class_name
+        correct_base += int(is_correct)
+        total_base += 1
+        symbol = "+" if is_correct else "-"
+        print(f"{symbol} {class_name:12} -> {result['class']:12} ({result['confidence']:.1%})")
+
+if total_base > 0:
+    print(f"\nBase class accuracy: {correct_base}/{total_base} = {correct_base/total_base:.1%}")
 
 # Test 2: NEW classes (model has NEVER seen these!)
 print("\n" + "-"*60)
@@ -47,18 +61,19 @@ print("\n" + "-"*60)
 print("TEST 3: Teaching new classes (5-shot learning)")
 print("-"*60)
 
+n_examples = 5  # Only 5 examples — the whole point of few-shot learning!
 for class_name in new_classes:
-    # Use first 5 images as examples
+    # Use images 0-4 for teaching
     examples = [
         f'custom_drawings/{class_name}/{i:04d}.png'
-        for i in range(5)
+        for i in range(n_examples)
         if os.path.exists(f'custom_drawings/{class_name}/{i:04d}.png')
     ]
     
     if len(examples) >= 3:
-        success = predictor.add_custom_class(class_name, examples[:5])
+        success = predictor.add_custom_class(class_name, examples)
         status = "OK" if success else "FAIL"
-        print(f"[{status}] Taught '{class_name}' with {len(examples[:5])} examples")
+        print(f"[{status}] Taught '{class_name}' with {len(examples)} examples")
 
 # Test 4: NEW classes AFTER teaching (should work!)
 print("\n" + "-"*60)
@@ -69,8 +84,8 @@ correct_count = 0
 total_count = 0
 
 for class_name in new_classes:
-    # Test on images the model has NEVER seen (images 10-15)
-    for i in range(10, 15):
+    # Test on images the model has NEVER seen (images 20-29, well separated from 0-4)
+    for i in range(20, 30):
         test_img = f'custom_drawings/{class_name}/{i:04d}.png'
         if os.path.exists(test_img):
             result = predictor.predict(test_img)
@@ -92,6 +107,8 @@ print(f"Total classes available: {classes['total']}")
 print(f"  Base (trained): {len(classes['base'])}")
 print(f"  Custom (few-shot): {len(classes['custom'])}")
 
+if total_base > 0:
+    print(f"\nBase class accuracy:     {correct_base}/{total_base} = {correct_base/total_base:.1%}")
 if total_count > 0:
-    print(f"\nFew-shot accuracy: {correct_count}/{total_count} = {correct_count/total_count:.1%}")
-    print(f"The model learned {len(new_classes)} new classes with just 5 examples each.")
+    print(f"Few-shot accuracy:       {correct_count}/{total_count} = {correct_count/total_count:.1%}")
+    print(f"\nThe model learned {len(new_classes)} new classes with just {n_examples} examples each.")
