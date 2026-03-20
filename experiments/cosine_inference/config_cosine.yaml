@@ -9,7 +9,7 @@ data:
   num_channels: 1
   
   # Episode Configuration (Meta-Learning)
-  n_way: 20  # Number of classes per episode (higher = matches inference conditions better)
+  n_way: 10  # Number of classes per episode (higher = better generalization)
   n_support: 5  # Shots per class in support set
   n_query: 10  # Queries per class
   
@@ -24,7 +24,7 @@ data:
 model:
   encoder: "conv4"
   embedding_dim: 512
-  distance_metric: "cosine"
+  distance_metric: "euclidean"
   
   # Encoder-specific parameters
   conv4:
@@ -84,6 +84,9 @@ storage:
 inference:
   confidence_threshold: 0.6
   top_k: 3
+  temperature: 5.0  # Softmax temperature for confidence calibration (lower = sharper)
+  distance_metric: "cosine"  # Override distance at inference (cosine is more stable)
+  n_way_inference: 10  # Re-rank top-N candidates before softmax (match training n_way)
 
 # Visualization Configuration
 visualization:
