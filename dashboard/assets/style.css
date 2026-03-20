@@ -114,6 +114,12 @@ body {
     display: flex;
     flex-direction: column;
     overflow-y: auto;
+    overflow-x: hidden !important;
+    transition: width 0.3s ease, min-width 0.3s ease;
+}
+.sidebar--expanded {
+    width: 600px !important;
+    min-width: 600px !important;
 }
 .sidebar::-webkit-scrollbar       { width: 5px; }
 .sidebar::-webkit-scrollbar-thumb { background: #3a4235; border-radius: 2px; }
@@ -223,6 +229,7 @@ body {
 .dist-pct {
     font-size: 10px; color: #7a7860; width: 28px; text-align: right;
 }
+
 
 /* ==========================================================
    PROTOTYPE OVERRIDE LIST
@@ -429,13 +436,8 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 /* ==========================================================
-   GRAD-CAM OVERLAY  (Phase 1)
+   INSPECTOR IMAGE ROW
    ========================================================== */
-.gradcam-active {
-    background: #3a4235 !important;
-    color: #e8a420 !important;
-    border-color: #e8a420 !important;
-}
 .inspector-img-row {
     display: flex;
     gap: 6px;
@@ -458,17 +460,6 @@ input[type="number"]::-webkit-inner-spin-button {
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-.inspector-img-label--correct {
-    color: #3d9970;
-    font-weight: 600;
-}
-.inspector-img-label--true {
-    color: #3d9970;
-}
-.inspector-img-label--wrong {
-    color: #e05252;
-    font-weight: 600;
-}
 
 /* ==========================================================
    SUPPORT DIAGNOSTICS  (Phase 2)
@@ -488,237 +479,244 @@ input[type="number"]::-webkit-inner-spin-button {
     cursor: default;
 }
 
-/* ==========================================================
-   SPATIAL MASK EDITOR — MODAL  (Phase 3)
-   ========================================================== */
-
-/* overlay backdrop */
-.mask-modal {
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: rgba(10, 12, 8, 0.85);
-    z-index: 1000;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-/* dialog body */
-.mask-modal-body {
-    background: #232820;
-    border: 2px solid #3a4235;
-    border-radius: 4px;
-    padding: 16px 20px;
-    max-width: 640px;
-    width: 90vw;
-    max-height: 90vh;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-}
-
-/* header bar */
-.modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-.modal-title-row {
-    display: flex;
-    align-items: baseline;
-    gap: 4px;
-}
-.modal-title {
-    font-size: 12px;
-    font-weight: 700;
-    color: #e8a420;
-    letter-spacing: 1.2px;
-}
-.modal-subtitle {
-    font-size: 11px;
-    color: #7a7860;
-}
-.modal-close-btn {
-    width: 28px; height: 28px;
-    border: 2px solid #3a4235;
-    background: transparent;
-    color: #c8c4a8;
-    font-size: 14px;
-    cursor: pointer;
-    border-radius: 2px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-family: Consolas, monospace;
-    transition: all 0.15s;
-}
-.modal-close-btn:hover {
-    border-color: #c84040;
-    color: #c84040;
-}
-
-/* stats bar */
-.mask-stats-bar {
-    display: flex;
-    gap: 16px;
-    padding: 6px 10px;
-    background: #1a1d17;
-    border: 1px solid #3a4235;
-    border-radius: 2px;
-}
-.mask-stat {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-}
-.mask-stat-label {
-    font-size: 9px;
-    color: #7a7860;
-    letter-spacing: 0.8px;
-    font-weight: 700;
-}
-.mask-stat-value {
-    font-size: 13px;
-    color: #c8c4a8;
-    font-weight: 700;
-    font-family: Consolas, 'Courier New', monospace;
-}
-
-/* image panels row */
-.mask-panels {
-    display: flex;
-    gap: 16px;
-    justify-content: center;
-    flex-wrap: wrap;
-}
-.mask-panel {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-}
-.mask-panel-label {
-    font-size: 9px;
-    font-weight: 700;
-    color: #7a7860;
-    letter-spacing: 1px;
-    text-align: center;
-}
-.mask-panel-img {
-    border: 2px solid #3a4235;
-    border-radius: 2px;
-    image-rendering: pixelated;
-    background: #fff;
-}
-
-/* clickable grid overlay */
-.mask-img-wrapper {
-    position: relative;
-    border: 2px solid #3a4235;
-    border-radius: 2px;
-}
-.mask-grid {
-    position: absolute;
-    top: 0; left: 0;
-}
-.mask-cell {
-    position: absolute;
-    border: 1px solid rgba(200, 196, 168, 0.15);
-    cursor: pointer;
-    transition: background 0.12s;
-}
-.mask-cell:hover {
-    background: rgba(232, 164, 32, 0.3);
-}
-.mask-cell--excluded {
-    background: rgba(200, 64, 64, 0.5);
-}
-.mask-cell--excluded:hover {
-    background: rgba(200, 64, 64, 0.75);
-}
-
-/* bottom controls */
-.mask-modal-controls {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    align-items: center;
-}
-
-/* explanation block */
-.mask-explanation {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px 10px;
-    background: #1a1d17;
-    border: 1px solid #3a4235;
-    border-radius: 2px;
-}
-.mask-explain-title {
-    font-size: 9px;
-    font-weight: 700;
-    color: #e8a420;
-    letter-spacing: 1px;
-    margin-bottom: 2px;
-}
-.mask-explain-text {
-    font-size: 10px;
-    color: #c8c4a8;
-    line-height: 1.5;
-}
-
-/* mask badge on support thumbnails */
-.mask-badge {
-    font-size: 8px;
-    font-weight: 700;
-    color: #e8a420;
-    background: rgba(232, 164, 32, 0.2);
-    border: 1px solid #e8a420;
-    border-radius: 2px;
-    padding: 0 3px;
-    letter-spacing: 0.5px;
-}
-
-/* mask edit button in support items */
-.mask-edit-btn {
-    width: 22px; height: 22px;
-    border: none; background: transparent; color: #7a7860;
-    font-size: 13px; cursor: pointer; border-radius: 2px;
-    display: flex; align-items: center; justify-content: center;
-    flex-shrink: 0; transition: all 0.15s;
-    font-family: Consolas, monospace;
-}
-.mask-edit-btn:hover { background: rgba(232,164,32,0.15); color: #e8a420; }
+/* support button column (remove button) */
 .support-btn-col {
     display: flex; flex-direction: column; gap: 2px;
     align-items: center; flex-shrink: 0;
 }
 
+
 /* ==========================================================
-   SUGGESTIONS PANEL  (Phase 4)
+   INLINE CONFIRMATION — pending add / remove  (Phase 2)
    ========================================================== */
-.suggest-panel {
+
+/* pending-add: dashed border item at top of support list */
+.support-item--pending-add {
+    border-style: dashed !important;
+    border-width: 1px !important;
+    border-left-width: 3px !important;
+    background: rgba(232,164,32,0.06);
+}
+
+/* pending-remove: dimmed item with overlay */
+.support-item--pending-rm {
+    border-left-width: 3px !important;
+    overflow: visible;
+    min-height: 56px;
+}
+
+/* absolute overlay centred over the dimmed item */
+.pending-rm-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    background: rgba(26,29,23,0.72);
+    z-index: 10;
+    border-radius: 2px;
+}
+
+/* pending metadata row (label + delta) */
+.pending-meta {
     display: flex;
     flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
 }
-.suggest-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    overflow-y: auto;
-    margin-top: 4px;
-}
-.suggest-section-label {
+.pending-label {
     font-size: 9px;
     font-weight: 700;
     color: #e8a420;
-    letter-spacing: 1.2px;
-    margin-top: 6px;
-    margin-bottom: 2px;
+    letter-spacing: 1px;
 }
-.suggest-row {
+
+/* inline action row in inspector (replaces add button when staged) */
+.inline-action-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    background: rgba(232,164,32,0.07);
+    border: 1px dashed #e8a420;
+    border-radius: 2px;
+    flex-wrap: wrap;
+}
+
+/* button column in pending-add item */
+.inline-btn-col {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex-shrink: 0;
+}
+
+/* ✓ confirm button — small variant */
+button.inline-confirm {
+    width: 22px !important;
+    height: 22px !important;
+    border: 2px solid #50a050 !important;
+    background: rgba(80,160,80,0.12) !important;
+    color: #50a050 !important;
+    border-radius: 2px !important;
+    cursor: pointer !important;
+    font-size: 13px !important;
+    line-height: 1 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-family: Consolas, monospace !important;
+    transition: background 0.12s !important;
+    flex-shrink: 0 !important;
+}
+button.inline-confirm:hover {
+    background: rgba(80,160,80,0.3) !important;
+}
+
+/* ✕ cancel button — small variant */
+button.inline-cancel {
+    width: 22px !important;
+    height: 22px !important;
+    border: 2px solid #3a4235 !important;
+    background: transparent !important;
+    color: #7a7860 !important;
+    border-radius: 2px !important;
+    cursor: pointer !important;
+    font-size: 13px !important;
+    line-height: 1 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-family: Consolas, monospace !important;
+    transition: all 0.12s !important;
+    flex-shrink: 0 !important;
+}
+button.inline-cancel:hover {
+    border-color: #c84040 !important;
+    color: #c84040 !important;
+}
+
+/* large variants for the overlay (remove confirm) */
+button.inline-confirm--lg {
+    width: 34px !important;
+    height: 30px !important;
+    font-size: 16px !important;
+    border: 2px solid #50a050 !important;
+    background: rgba(80,160,80,0.15) !important;
+    color: #50a050 !important;
+    border-radius: 2px !important;
+    cursor: pointer !important;
+    line-height: 1 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-family: Consolas, monospace !important;
+    transition: background 0.12s !important;
+}
+button.inline-confirm--lg:hover {
+    background: rgba(80,160,80,0.35) !important;
+}
+button.inline-cancel--lg {
+    width: 34px !important;
+    height: 30px !important;
+    font-size: 16px !important;
+    border: 2px solid #3a4235 !important;
+    background: transparent !important;
+    color: #7a7860 !important;
+    border-radius: 2px !important;
+    cursor: pointer !important;
+    line-height: 1 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-family: Consolas, monospace !important;
+    transition: all 0.12s !important;
+}
+button.inline-cancel--lg:hover {
+    border-color: #c84040 !important;
+    color: #c84040 !important;
+}
+
+/* ==========================================================
+   CHANGELOG  (Phase 2)
+   ========================================================== */
+.changelog-display {
+    margin-top: 6px;
+}
+.log-header {
+    font-size: 9px;
+    font-weight: 700;
+    color: #7a7860;
+    letter-spacing: 1px;
+    margin-bottom: 3px;
+}
+.log-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: 72px;
+    overflow-y: auto;
+}
+.log-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+    padding: 1px 0;
+}
+.log-label {
+    font-size: 9px;
+    color: #7a7860;
+    font-family: Consolas, 'Courier New', monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+.log-delta {
+    font-size: 9px;
+    font-family: Consolas, 'Courier New', monospace;
+    flex-shrink: 0;
+}
+
+/* ==========================================================
+   WHY WRONG — misclassification chain  (Phase 3)
+   ========================================================== */
+.why-section {
+    margin-top: 8px;
+    border-top: 1px solid #3a4235;
+    padding-top: 8px;
+}
+.why-title-row {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    margin-bottom: 6px;
+}
+.why-header {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+}
+.why-sub {
+    font-size: 9px;
+    color: #7a7860;
+    line-height: 1.4;
+}
+.why-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.why-row {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -727,47 +725,250 @@ input[type="number"]::-webkit-inner-spin-button {
     border-radius: 2px;
     padding: 4px 6px;
 }
-.suggest-imgs {
-    display: flex;
-    align-items: center;
-    gap: 3px;
+.why-thumb {
+    width: 32px;
+    height: 32px;
+    border-radius: 2px;
+    border: 1px solid #3a4235;
+    image-rendering: pixelated;
+    background: #fff;
     flex-shrink: 0;
 }
-.suggest-thumb {
-    width: 32px; height: 32px;
-    border-radius: 2px; border: 1px solid #3a4235;
-    image-rendering: pixelated; background: #fff;
-}
-.suggest-arrow {
-    font-size: 11px;
-    color: #7a7860;
-}
-.suggest-stats {
-    display: flex;
-    flex-direction: column;
+.why-bar-col {
     flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 5px;
     min-width: 0;
 }
-.suggest-delta {
-    font-size: 11px;
-    font-weight: 700;
-    font-family: Consolas, 'Courier New', monospace;
+.why-bar {
+    flex: 1;
+    height: 4px;
+    background: #2e332a;
+    border-radius: 2px;
+    overflow: hidden;
 }
-.suggest-acc {
+.why-bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.2s;
+}
+.why-sim {
     font-size: 9px;
     color: #7a7860;
     font-family: Consolas, 'Courier New', monospace;
+    flex-shrink: 0;
+    width: 28px;
+    text-align: right;
 }
-.suggest-apply {
+.why-view-btn {
+    font-size: 9px !important;
+    padding: 1px 5px !important;
     flex-shrink: 0;
 }
-.suggest-btn-group {
+
+/* ==========================================================
+   CLASS CONFIGURATION  (Phase 4)
+   ========================================================== */
+.class-config-panel {
+    margin-top: 6px;
+}
+.class-chip-grid {
     display: flex;
-    flex-direction: column;
-    gap: 2px;
-    flex-shrink: 0;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-bottom: 2px;
 }
-.suggest-preview {
-    font-size: 11px;
-    flex-shrink: 0;
+button.class-chip {
+    font-size: 9px !important;
+    padding: 2px 6px !important;
+    border: 1px solid #2e332a !important;
+    background: #1a1d17 !important;
+    color: #4a4e44 !important;
+    border-radius: 2px !important;
+    cursor: pointer !important;
+    font-family: Consolas, 'Courier New', monospace !important;
+    letter-spacing: 0.3px !important;
+    transition: all 0.12s !important;
+}
+button.class-chip--on {
+    font-weight: 700 !important;
+    /* color/background/border set inline per class color */
+}
+button.class-chip:not(.class-chip--on):not(.class-chip--disabled):hover {
+    border-color: #5a6455 !important;
+    color: #7a7860 !important;
+    background: #232820 !important;
+}
+button.class-chip--disabled {
+    opacity: 0.25 !important;
+    cursor: not-allowed !important;
+}
+
+/* ==========================================================
+   SAVE INDICATOR  (Phase 4)
+   ========================================================== */
+.save-indicator {
+    font-size: 9px;
+    color: #7a7860;
+    font-family: Consolas, 'Courier New', monospace;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+}
+
+/* ==========================================================
+   CLASS CONFIG PANEL — two-step redesign
+   ========================================================== */
+.class-config-panel {
+    margin-top: 6px;
+}
+
+/* Section label: "ACTIVE" / "AVAILABLE" */
+.chip-section-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    color: #7a7860;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+    margin-top: 2px;
+}
+
+/* Chip grid */
+.class-chip-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 2px;
+}
+.class-chip-grid--available {
+    gap: 3px;
+}
+
+/* Wrapper: chip button + swatch button side by side */
+.chip-with-swatch {
+    display: flex;
+    align-items: center;
+    gap: 0;
+}
+
+/* Base chip */
+button.class-chip {
+    font-size: 9px !important;
+    padding: 3px 7px !important;
+    border: 1px solid #2e332a !important;
+    background: #1a1d17 !important;
+    color: #4a4e44 !important;
+    border-radius: 2px 0 0 2px !important;
+    cursor: pointer !important;
+    font-family: Consolas, 'Courier New', monospace !important;
+    letter-spacing: 0.2px !important;
+    transition: all 0.12s !important;
+    white-space: nowrap !important;
+    line-height: 1.4 !important;
+}
+
+/* Active chip (currently in UMAP): border/bg/color set inline */
+button.class-chip--active {
+    border-radius: 2px 0 0 2px !important;
+}
+
+/* Staged for removal: line-through, dimmed */
+button.class-chip--staged-rm {
+    text-decoration: line-through !important;
+    opacity: 0.6 !important;
+}
+
+/* Available chip not in swatch wrapper — full border radius */
+.class-chip-grid--available button.class-chip {
+    border-radius: 2px !important;
+}
+
+/* Staged to add: green tint */
+button.class-chip--staged-add {
+    border-style: dashed !important;
+}
+
+button.class-chip--disabled {
+    opacity: 0.22 !important;
+    cursor: not-allowed !important;
+}
+
+button.class-chip:not(.class-chip--disabled):hover {
+    filter: brightness(1.15) !important;
+}
+
+/* Color swatch button */
+button.color-swatch-btn {
+    width: 16px !important;
+    height: 100% !important;
+    min-height: 22px !important;
+    border: none !important;
+    border-radius: 0 2px 2px 0 !important;
+    cursor: pointer !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    flex-shrink: 0 !important;
+    padding: 0 !important;
+    opacity: 0.8 !important;
+    transition: opacity 0.12s, transform 0.1s !important;
+}
+button.color-swatch-btn:hover {
+    opacity: 1 !important;
+    transform: scaleX(1.4) !important;
+}
+button.color-swatch-btn:active {
+    transform: scaleX(1.8) !important;
+}
+
+/* APPLY button */
+button.apply-classes-btn {
+    font-size: 10px !important;
+    font-weight: 700 !important;
+    padding: 5px 12px !important;
+    border: 2px solid #3a4235 !important;
+    background: transparent !important;
+    color: #7a7860 !important;
+    border-radius: 2px !important;
+    cursor: not-allowed !important;
+    font-family: Consolas, 'Courier New', monospace !important;
+    letter-spacing: 0.5px !important;
+    transition: all 0.18s !important;
+    width: 100% !important;
+    opacity: 0.5 !important;
+}
+button.apply-classes-btn--active {
+    border-color: #e8a420 !important;
+    color: #e8a420 !important;
+    background: rgba(232,164,32,0.08) !important;
+    cursor: pointer !important;
+    opacity: 1 !important;
+    animation: apply-pulse 2s ease-in-out infinite !important;
+}
+button.apply-classes-btn--active:hover {
+    background: rgba(232,164,32,0.2) !important;
+    animation: none !important;
+}
+
+@keyframes apply-pulse {
+    0%   { box-shadow: 0 0 0 0   rgba(232,164,32,0.35); }
+    50%  { box-shadow: 0 0 0 4px rgba(232,164,32,0.0); }
+    100% { box-shadow: 0 0 0 0   rgba(232,164,32,0.35); }
+}
+
+/* Apply row container */
+.apply-row {
+    display: flex;
+    gap: 6px;
+}
+
+/* Candidates view mount animation to mask transition lag */
+.candidates-panel {
+    animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
 }
