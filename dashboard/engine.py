@@ -66,6 +66,10 @@ class AnalyticsEngine:
         self._umap_reducer = None   # fitted UMAP reducer for .transform()
         self._kd_tree = None        # KDTree over embeddings_2d for mesh lookup
 
+        # In-process caches (cleared when arrays are mutated)
+        self._b64_cache: dict = {}      # (idx, size) -> base64 string
+        self._coact_cache: dict = {}    # (q_idx, s_idx, size) -> (str, str)
+
     # ------------------------------------------------------------------
     # Initialisation — loads real model, images, computes embeddings
     # ------------------------------------------------------------------
@@ -207,29 +211,27 @@ class AnalyticsEngine:
         self.embeddings_2d = reducer.fit_transform(self.embeddings_hd)
         from scipy.spatial import cKDTree
         self._kd_tree = cKDTree(self.embeddings_2d)
+        self._b64_cache = {}
+        self._coact_cache = {}
 
 
     # ------------------------------------------------------------------
-    # Persistence — session + class selection
+    # Persistence — session
     # ------------------------------------------------------------------
 
-    def save_session(self, path: str) -> None:
-        """Serialize sc-store default_support to disk."""
+    def save_session(self, path: str, state: Dict) -> None:
+        """Serialize central application state to disk."""
         try:
             with open(path, 'w') as f:
-                json.dump({
-                    'default_support': self.default_support,
-                    'class_names': list(self.class_names),
-                }, f)
+                json.dump(state, f)
         except Exception as e:
             logger.warning("save_session failed: %s", e)
 
     def load_session(self, path: str) -> Optional[Dict]:
-        """Return saved default_support dict or None if not found."""
+        """Return full saved session data or None if not found."""
         try:
             with open(path) as f:
-                data = json.load(f)
-            return data.get('default_support')
+                return json.load(f)
         except Exception:
             return None
 
@@ -240,22 +242,6 @@ class AnalyticsEngine:
         if not d.exists():
             return list(CLASS_NAMES)
         return sorted(p.name for p in d.iterdir() if p.is_dir())
-
-    def save_class_selection(self, path: str) -> None:
-        """Write active class list to disk."""
-        try:
-            with open(path, 'w') as f:
-                json.dump({'active': list(self.class_names)}, f)
-        except Exception as e:
-            logger.warning("save_class_selection failed: %s", e)
-
-    def load_class_selection(self, path: str) -> Optional[List[str]]:
-        """Return saved active class list or None."""
-        try:
-            with open(path) as f:
-                return json.load(f).get('active')
-        except Exception:
-            return None
 
     # ------------------------------------------------------------------
     # Dynamic class management
@@ -344,6 +330,8 @@ class AnalyticsEngine:
         # Rebuild KD-tree
         from scipy.spatial import cKDTree
         self._kd_tree = cKDTree(self.embeddings_2d)
+        self._b64_cache = {}
+        self._coact_cache = {}
 
         self.class_names.append(name)
         self.n_classes = len(self.class_names)
@@ -408,6 +396,8 @@ class AnalyticsEngine:
         # Rebuild KD-tree
         from scipy.spatial import cKDTree
         self._kd_tree = cKDTree(self.embeddings_2d)
+        self._b64_cache = {}
+        self._coact_cache = {}
         
         # Update class lists
         for n in valid_names:
@@ -612,18 +602,29 @@ class AnalyticsEngine:
             
         from scipy.spatial import cKDTree
         self._kd_tree = cKDTree(self.embeddings_2d)
+        # New image added — invalidate thumbnail cache for this index
+        # (coact cache is unaffected since new idx has no prior entry)
+        self._b64_cache.pop((idx, 56), None)
+        self._b64_cache.pop((idx, 80), None)
+        self._b64_cache.pop((idx, 32), None)
         
         return idx
 
     # ------------------------------------------------------------------
 
     def image_to_base64(self, idx: int, size: int = 56) -> str:
+        key = (idx, size)
+        cached = self._b64_cache.get(key)
+        if cached is not None:
+            return cached
         arr = self.images[idx]
         img = Image.fromarray(arr.astype(np.uint8), mode='L')
         img = img.resize((size, size), Image.NEAREST)
         buf = io.BytesIO()
         img.save(buf, format='PNG')
-        return 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
+        result = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
+        self._b64_cache[key] = result
+        return result
 
     def support_indices(self, sc: Dict) -> set:
         out: set = set()
@@ -719,10 +720,10 @@ class AnalyticsEngine:
         )
 
         nc = len(order)
-        cm = np.zeros((nc, nc), dtype=int)
-        for t, p in zip(true_idx, preds):
+        cm = np.zeros((nc, nc), dtype=float)
+        for t, prob_vec in zip(true_idx, probs):
             if t >= 0:
-                cm[t, p] += 1
+                cm[t] += prob_vec
 
         accs = {}
         for i, cn in enumerate(order):
@@ -862,6 +863,13 @@ class AnalyticsEngine:
             
             from scipy.spatial import cKDTree
             self._kd_tree = cKDTree(self.embeddings_2d)
+            # Replaced image — evict the old index from thumbnail cache
+            for _size in (32, 56, 80):
+                self._b64_cache.pop((idx, _size), None)
+            self._coact_cache = {
+                k: v for k, v in self._coact_cache.items()
+                if k[0] != idx and k[1] != idx
+            }
             
             return len(self.images) - 1
             
@@ -881,6 +889,79 @@ class AnalyticsEngine:
             'p2d': np.array([]),
             'phd': np.array([]),
         }
+
+    def get_co_activation_images(self, q_idx: int, s_idx: int, size: int = 120) -> Tuple[str, str]:
+        """Compute spatial Dense Co-Activation Correspondence between query and support image.
+        Intercepts internal Conv4 layers to return glowing visual analytic heatmaps.
+        """
+        key = (q_idx, s_idx, size)
+        cached = self._coact_cache.get(key)
+        if cached is not None:
+            return cached
+        import torch
+        import torch.nn.functional as F
+        import matplotlib.pyplot as plt
+        
+        # 1. Fetch raw PyTorch grids
+        img_q = self.images[q_idx]
+        img_s = self.images[s_idx]
+        
+        t_q = self._transform(Image.fromarray(img_q.astype(np.uint8), mode='L')).unsqueeze(0)
+        t_s = self._transform(Image.fromarray(img_s.astype(np.uint8), mode='L')).unsqueeze(0)
+        
+        with torch.no_grad():
+            # 2. Extract deep 4x4 Spatial Features cleanly
+            feat_q = self._encoder.encoder(t_q)  
+            feat_s = self._encoder.encoder(t_s)
+        
+        B, C, H, W = feat_q.shape  # 1, 512, 4, 4
+        
+        # 3. Compute pairwise Cosine Similarity Matrix globally
+        vec_q = feat_q.view(C, -1).t()
+        vec_s = feat_s.view(C, -1).t()
+        
+        vec_q_norm = F.normalize(vec_q, p=2, dim=1)
+        vec_s_norm = F.normalize(vec_s, p=2, dim=1)
+        
+        sim_matrix = torch.mm(vec_q_norm, vec_s_norm.t())
+        sim_matrix = F.relu(sim_matrix)
+        
+        # 4. Filter spatial strongest-match intensities
+        q_scores, _ = sim_matrix.max(dim=1)
+        s_scores, _ = sim_matrix.max(dim=0)
+        
+        q_grid = q_scores.view(1, 1, H, W)
+        s_grid = s_scores.view(1, 1, H, W)
+        
+        # 5. Bicubic Upsample cleanly to 64x64 HD layout
+        q_hm = F.interpolate(q_grid, size=(64, 64), mode='bicubic', align_corners=False).squeeze().numpy()
+        s_hm = F.interpolate(s_grid, size=(64, 64), mode='bicubic', align_corners=False).squeeze().numpy()
+        
+        q_hm = np.clip((q_hm - q_hm.min()) / (q_hm.max() - q_hm.min() + 1e-9), 0, 1)
+        s_hm = np.clip((s_hm - s_hm.min()) / (s_hm.max() - s_hm.min() + 1e-9), 0, 1)
+        
+        cmap = plt.colormaps.get_cmap('magma')
+        
+        def apply_heatmap(img_arr, hm_arr):
+            colored_hm = cmap(hm_arr)[:, :, :3] * 255
+            base_img = np.stack((img_arr,) * 3, axis=-1).astype(float)
+            base_img = base_img * 0.4  # Dim background structural grid
+            
+            # Blend maps heavily enforcing the visual focus glow geometry
+            alpha = hm_arr[:, :, np.newaxis] ** 1.8 
+            blended = (base_img * (1 - alpha)) + (colored_hm * alpha)
+            
+            final_img = Image.fromarray(blended.astype(np.uint8))
+            if size != 64:
+                final_img = final_img.resize((size, size), Image.NEAREST)
+                
+            buf = io.BytesIO()
+            final_img.save(buf, format="PNG")
+            return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+            
+        result = apply_heatmap(img_q, q_hm), apply_heatmap(img_s, s_hm)
+        self._coact_cache[key] = result
+        return result
 
     def query_distances(self, qidx: int, sc: Dict, temperature: float = 1.0) -> Dict:
         """Distance breakdown for a single query (HD-based)."""
@@ -938,5 +1019,13 @@ class AnalyticsEngine:
         grid = np.c_[xx.ravel(), yy.ravel()]
         d = cdist(grid, p2d)
         temp = max(temperature, 0.01)
-        zz = np.argmin(d / temp, axis=1).reshape(xx.shape)
-        return xx, ys, zz, np.zeros_like(zz, dtype=float)
+        
+        logits = -d / temp
+        logits -= logits.max(axis=1, keepdims=True)
+        probs = np.exp(logits)
+        probs /= probs.sum(axis=1, keepdims=True)
+        
+        zz_class = np.argmax(probs, axis=1).reshape(xx.shape)
+        zz_alpha = probs.max(axis=1).reshape(xx.shape)
+        
+        return xx, ys, zz_class, zz_alpha

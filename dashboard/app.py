@@ -12,7 +12,7 @@ import plotly.graph_objects as go
 from dash import (
     Dash, html, dcc,
     Input, Output, State,
-    callback_context, ALL, no_update,
+    callback_context, ALL, no_update, Patch,
 )
 from dash.exceptions import PreventUpdate
 
@@ -21,17 +21,17 @@ from dashboard.engine import AnalyticsEngine, CLASS_COLORS, CLASS_NAMES
 # =====================================================================
 # Engine initialisation
 # =====================================================================
-_SESSION_PATH = str(_ROOT / 'session.json') if '_ROOT' in dir() else 'session.json'
-_CLASS_SEL_PATH = 'class_selection.json'
 _SESSION_PATH = str(Path(__file__).resolve().parent.parent / 'session.json')
-_CLASS_SEL_PATH = str(Path(__file__).resolve().parent.parent / 'class_selection.json')
 
 import os
 
 _engine_tmp = AnalyticsEngine()
 
-# Load saved class selection if present
-_saved_classes = _engine_tmp.load_class_selection(_CLASS_SEL_PATH)
+# Load central session if present
+_saved_session = _engine_tmp.load_session(_SESSION_PATH) or {}
+_saved_classes = _saved_session.get("classes")
+_saved_sc = _saved_session.get("sc", _saved_session.get("default_support", {}))
+_saved_colors = _saved_session.get("colors", {})
 
 is_worker = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
 is_main_file = __name__ == "__main__"
@@ -42,19 +42,17 @@ if not is_main_file or is_worker:
 
     print(f"Ready — {len(engine.images)} sketches, {engine.n_classes} classes")
 
-    # Load saved session if present
-    _saved_session = engine.load_session(_SESSION_PATH)
-    if _saved_session:
+    if _saved_sc:
         n = len(engine.images)
         valid_session = {}
-        for cname, items in _saved_session.items():
+        for cname, items in _saved_sc.items():
             if cname not in engine.class_names:
                 continue
             ci = engine.class_names.index(cname)
             valid_items = [
                 it for it in items
                 if it.get("idx", n) < n
-                and int(engine.labels[it["idx"]]) == ci
+                and isinstance(it.get("idx"), int) and int(engine.labels[it["idx"]]) == ci
             ]
             if valid_items:
                 valid_session[cname] = valid_items
@@ -113,10 +111,8 @@ def _hex_rgba(hex_color: str, alpha: float) -> str:
 
 
 def _uirev_hash(sc, temp, sel_q, uirev) -> str:
-    """Stable hash of all scatter inputs *except* pov.
-    """
-    key = json.dumps(sc, sort_keys=True) + str(temp) + str(sel_q) + str(uirev)
-    return hashlib.md5(key.encode()).hexdigest()[:8]
+    """Stable hash explicitly locked to manual view resets and undo/redo."""
+    return str(uirev)
 
 
 # =====================================================================
@@ -295,6 +291,14 @@ app.layout = html.Div(
                                     ],
                                     className="undo-redo-row",
                                 ),
+                                html.Details(
+                                    [
+                                        html.Summary(id="history-summary", children="History: No actions"),
+                                        html.Ul(id="history-list", className="history-list")
+                                    ],
+                                    className="history-log-panel",
+                                    style={"marginTop": "8px", "fontSize": "11px", "cursor": "pointer", "userSelect": "none"}
+                                ),
                                 html.Div(
                                     "Drag ★ to reposition prototypes.",
                                     className="hint-text",
@@ -308,21 +312,7 @@ app.layout = html.Div(
                             [
                                 html.Div(id="detail-panel",
                                          className="detail-panel"),
-                                # These draw-panel status elements live here permanently
-                                # so callbacks can always find them, even when the
-                                # draw panel itself is not rendered inside detail-panel.
-                                html.Div(id="draw-live-confidence",
-                                         className="hint-text",
-                                         style={"display": "none", "textAlign": "center",
-                                                "marginTop": "6px", "color": "#aaaaaa"}),
-                                html.Div(id="draw-stage-status",
-                                         className="hint-text",
-                                         style={"display": "none", "textAlign": "center",
-                                                "marginTop": "4px", "color": "#00ff88"}),
-                                html.Div(id="draw-staged-thumbs-static",
-                                         style={"display": "none", "gap": "6px",
-                                                "marginTop": "12px", "overflowX": "auto",
-                                                "padding": "4px"}),
+                                # draw-panel status elements moved into _render_canvas_tool
                             ],
                             className="sidebar-section support-section",
                         ),
@@ -337,8 +327,9 @@ app.layout = html.Div(
         # ── stores ──────────────────────────────────────────────
         dcc.Store(id="sc-store",            data=engine.default_support),
         dcc.Store(id="proto-ov-store",      data={}),
-        dcc.Store(id="proto-undo-store",    data=[]),
-        dcc.Store(id="proto-redo-store",    data=[]),
+        dcc.Store(id="master-undo-store",   data=[]),
+        dcc.Store(id="master-redo-store",   data=[]),
+        dcc.Store(id="master-view-id",      data=0),
         dcc.Store(id="proto-order-store",   data=[]),
         dcc.Store(id="sel-query-store",     data=None),
         dcc.Store(id="sel-support-store",   data=None),
@@ -360,9 +351,54 @@ app.layout = html.Div(
         dcc.Store(id="new-class-drawings-store", data=[]),
         dcc.Store(id="new-class-name-store", data=""),
         dcc.Store(id="engine-version-store", data=0),
+        # proto drag undo/redo (were referenced by handle_annotation_drag but never declared)
+        dcc.Store(id="proto-undo-store",  data=[]),
+        dcc.Store(id="proto-redo-store",  data=[]),
+        # filtered relay store — clientside callback writes here only when
+        # annotation keys are present, eliminating zoom/pan server round-trips
+        dcc.Store(id="annotation-relayout-store", data=None),
     ],
     className="root",
 )
+
+
+# =====================================================================
+# Clientside callback — filter relayoutData before it hits the server.
+# Only annotation drag events contain keys like "annotations[0].x".
+# Zoom, pan, and autorange events are swallowed client-side, eliminating
+# the round-trip that was causing zoom jitter.
+# =====================================================================
+app.clientside_callback(
+    """
+    function(relayoutData) {
+        if (!relayoutData) return window.dash_clientside.no_update;
+        var hasAnnotation = Object.keys(relayoutData).some(
+            function(k) { return k.indexOf('annotations[') === 0; }
+        );
+        return hasAnnotation ? relayoutData : window.dash_clientside.no_update;
+    }
+    """,
+    Output("annotation-relayout-store", "data"),
+    Input("scatter", "relayoutData"),
+)
+
+# =====================================================================
+# Decision-mesh cache — reused when sc and temp haven't changed.
+# Avoids 800×800 cdist + PNG re-encode on selection clicks, ghost
+# sketch updates, and color-only changes.
+# =====================================================================
+_mesh_cache: dict = {"key": None, "result": None}
+
+# Maximum entries retained in any undo stack (prevents unbounded growth)
+_MAX_UNDO = 50
+
+
+def _mesh_cache_key(sc: dict, temp: float) -> str:
+    """Stable string key for the decision mesh inputs."""
+    return hashlib.md5(
+        json.dumps(sc, sort_keys=True, default=str).encode() +
+        str(round(temp, 3)).encode()
+    ).hexdigest()
 
 
 # =====================================================================
@@ -379,15 +415,15 @@ app.layout = html.Div(
     Output("proto-order-store", "data"),
     Input("sc-store", "data"),
     Input("temp-slider", "value"),
-    Input("sel-query-store", "data"),
     Input("whatif-store", "data"),
     Input("color-map-store", "data"),
     Input("drawing-ghost-store", "data"),
     Input({"type": "assign-class-dropdown", "index": ALL}, "value"),
     Input("engine-version-store", "data"),
-    State("uirev-store", "data"),
+    State("sel-query-store", "data"),
+    State("master-view-id", "data"),
 )
-def update_scatter(sc, temp, sel_q, whatif_sc, color_map, drawing_ghost, active_class_list, _engine_ver, uirev):
+def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, active_class_list, _engine_ver, sel_q, uirev):
     color_map = color_map or {}
     active_class = active_class_list[0] if active_class_list else None
 
@@ -400,22 +436,102 @@ def update_scatter(sc, temp, sel_q, whatif_sc, color_map, drawing_ghost, active_
     sfig = _base_fig(title="Embedding Space  (UMAP)",
                      uirevision=_uirev_hash(sc, temp, sel_q, uirev))
 
-    # decision mesh — 2D Voronoi approximation (smooth, spatially coherent)
-    xx, ys, zz_class, zz_alpha = engine.decision_mesh(sc, temp, res=60)
-    if len(xx) > 0:
+    # ── Decision mesh — cached by (sc, temp) so zoom/color/ghost updates
+    # don't re-run the 800×800 cdist and PNG encode
+    global _mesh_cache
+    _mk = _mesh_cache_key(sc, temp)
+    if _mesh_cache["key"] == _mk:
+        cached_mesh = _mesh_cache["result"]
+    else:
+        cached_mesh = None
+
+    if cached_mesh is None:
+        xx, ys, zz_class, zz_alpha = engine.decision_mesh(sc, temp, res=800)
         nc = len(order)
-        cvals = []
+        res_val = zz_class.shape[0]
+        img_rgba = np.zeros((res_val, res_val, 4), dtype=np.uint8)
+        base_alpha = 115  # ~45% max opacity
+        
+        def hex_to_rgb(hx):
+            hx = hx.lstrip('#')
+            return tuple(int(hx[i:i+2], 16) for i in (0, 2, 4))
+            
+        # Calculate topographical elevation bands
+        STEPS = 6
+        norm_alpha = (zz_alpha - 1.0/nc) / (1.0 - 1.0/nc + 1e-9)
+        norm_alpha = np.clip(norm_alpha, 0, 1) ** 0.8
+        zz_band = np.ceil(norm_alpha * STEPS)
+        
+        # Edge detection for contour lines (np.roll shifts the array to compare neighbors)
+        edge_mask = (
+            (zz_band != np.roll(zz_band, 1, axis=0)) |
+            (zz_band != np.roll(zz_band, -1, axis=0)) |
+            (zz_band != np.roll(zz_band, 1, axis=1)) |
+            (zz_band != np.roll(zz_band, -1, axis=1)) |
+            (zz_class != np.roll(zz_class, 1, axis=0)) |
+            (zz_class != np.roll(zz_class, -1, axis=0)) |
+            (zz_class != np.roll(zz_class, 1, axis=1)) |
+            (zz_class != np.roll(zz_class, -1, axis=1))
+        )
+        
+        # Prevent boundary rendering from wrap-around roll
+        edge_mask[0, :] = False
+        edge_mask[-1, :] = False
+        edge_mask[:, 0] = False
+        edge_mask[:, -1] = False
+
         for i in range(nc):
-            lo = i / nc
-            hi = (i + 1) / nc
-            col = _resolve_color(order[i], list(engine.class_names), color_map)
-            cvals.append([lo, col])
-            cvals.append([hi, col])
-        sfig.add_trace(
-            go.Heatmap(
-                x=xx[0], y=ys, z=zz_class,
-                colorscale=cvals, opacity=0.08,
-                showscale=False, hoverinfo="skip",
+            col_str = _resolve_color(order[i], list(engine.class_names), color_map)
+            try:
+                r, g, b = hex_to_rgb(col_str)
+            except Exception:
+                r, g, b = (128, 128, 128)
+            
+            mask = (zz_class == i)
+            # Use discrete banded alpha
+            alpha_mask = zz_band[mask] / STEPS
+            
+            # Boost opacity heavily on contour edges for solid topographical lines
+            final_alpha = alpha_mask * base_alpha
+            edge_boost = np.where(edge_mask[mask], 180, final_alpha)
+            
+            img_rgba[mask, 0] = r
+            img_rgba[mask, 1] = g
+            img_rgba[mask, 2] = b
+            img_rgba[mask, 3] = np.clip(edge_boost, 0, 255).astype(np.uint8)
+
+        # Plotly layout images draw from top-left. Our ys array goes bottom-to-top.
+        # Flip vertically to render properly in Cartesian coordinates.
+        img_rgba = img_rgba[::-1, :, :]
+        
+        import io, base64
+        from PIL import Image as PILImage
+        img_pil = PILImage.fromarray(img_rgba)
+        
+        buf = io.BytesIO()
+        img_pil.save(buf, format="PNG")
+        img_str = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+        cached_mesh = {
+            "img_str": img_str,
+            "x0": float(xx[0][0]), "y1": float(ys[-1]),
+            "sizex": float(xx[0][-1] - xx[0][0]),
+            "sizey": float(ys[-1] - ys[0]),
+        }
+        _mesh_cache["key"] = _mk
+        _mesh_cache["result"] = cached_mesh
+
+    if cached_mesh:
+        sfig.add_layout_image(
+            dict(
+                source=cached_mesh["img_str"],
+                xref="x", yref="y",
+                x=cached_mesh["x0"], y=cached_mesh["y1"],
+                sizex=cached_mesh["sizex"],
+                sizey=cached_mesh["sizey"],
+                sizing="stretch",
+                opacity=1,
+                layer="below"
             )
         )
 
@@ -555,19 +671,6 @@ def update_scatter(sc, temp, sel_q, whatif_sc, color_map, drawing_ghost, active_
             opacity=0.95,
         )
 
-    # highlight selected query
-    if sel_q is not None and sel_q < len(engine.labels):
-        sfig.add_trace(
-            go.Scatter(
-                x=[engine.embeddings_2d[sel_q, 0]],
-                y=[engine.embeddings_2d[sel_q, 1]],
-                mode="markers",
-                marker=dict(size=16, color="rgba(0,0,0,0)",
-                            line=dict(width=3, color=ERR_COL)),
-                showlegend=False, hoverinfo="skip",
-            )
-        )
-
     # ── what-if ghost prototypes ──────────────────────────────────
     whatif_res = None
     if whatif_sc:
@@ -655,14 +758,71 @@ def update_scatter(sc, temp, sel_q, whatif_sc, color_map, drawing_ghost, active_
     return sfig, legend_items, stat, list(order)
 
 
+# ── 1b. Selection ring — lightweight Patch, no full figure rebuild ─
+# sel-query-store is now only an Input here (removed from update_scatter).
+# Uses Patch() to splice just the ring trace onto the existing figure,
+# so zoom state, viewport, and the background mesh are untouched.
+
+_SEL_TRACE_ID = "selection-ring"
+
+
+@app.callback(
+    Output("scatter", "figure", allow_duplicate=True),
+    Input("sel-query-store", "data"),
+    State("scatter", "figure"),
+    prevent_initial_call=True,
+)
+def update_selection_ring(sel_q, current_fig):
+    p = Patch()
+    # Remove any existing ring traces by rebuilding the data list without them.
+    # Patch supports item-level list mutations via p["data"] index assignment.
+    # Simpler: append the ring at a known position and overwrite it.
+    if current_fig is None:
+        raise PreventUpdate
+
+    # Strip old ring traces (identified by hoverinfo="skip" + size=16 marker)
+    # We use a Patch list-append approach: always append, and keep only the last.
+    # Clearing old rings requires knowing their index; instead we embed a uid.
+    # Cleanest approach: use allow_duplicate and rebuild just the ring element
+    # by comparing existing traces. Since Patch doesn't support list filtering,
+    # we do a targeted no_update when nothing changed and let update_scatter
+    # handle ring removal when sc changes (ring naturally disappears since
+    # update_scatter no longer adds it and figure is replaced wholesale).
+    if sel_q is not None and sel_q < len(engine.labels):
+        ring = go.Scatter(
+            x=[engine.embeddings_2d[sel_q, 0]],
+            y=[engine.embeddings_2d[sel_q, 1]],
+            mode="markers",
+            marker=dict(size=16, color="rgba(0,0,0,0)",
+                        line=dict(width=3, color=ERR_COL)),
+            showlegend=False, hoverinfo="skip",
+            uid=_SEL_TRACE_ID,
+        )
+        # Remove any previous ring by filtering existing traces, then append
+        existing = current_fig.get("data", [])
+        filtered = [t for t in existing if t.get("uid") != _SEL_TRACE_ID]
+        p["data"] = filtered + [ring]
+    else:
+        # Deselect — strip ring trace if present
+        existing = current_fig.get("data", [])
+        filtered = [t for t in existing if t.get("uid") != _SEL_TRACE_ID]
+        if len(filtered) == len(existing):
+            raise PreventUpdate  # no ring was present, nothing to do
+        p["data"] = filtered
+    return p
+
+
 # ── 2. Annotation drag → reweight support items ──────────────────
+# Now listens to annotation-relayout-store (pre-filtered by clientside
+# callback) instead of scatter.relayoutData directly.  Zoom and pan
+# events never reach this callback.
 
 
 @app.callback(
     Output("sc-store", "data", allow_duplicate=True),
     Output("proto-undo-store", "data", allow_duplicate=True),
     Output("proto-redo-store", "data", allow_duplicate=True),
-    Input("scatter", "relayoutData"),
+    Input("annotation-relayout-store", "data"),
     State("sc-store", "data"),
     State("proto-undo-store", "data"),
     State("proto-order-store", "data"),
@@ -699,7 +859,8 @@ def handle_annotation_drag(relayout, sc, undo_stack, order):
         raise PreventUpdate
 
     undo_stack = list(undo_stack or [])
-    undo_stack.append(sc)          # push full sc snapshot for undo
+    undo_stack.append(sc)
+    undo_stack = undo_stack[-_MAX_UNDO:]
     return new_sc, undo_stack, []  # clear redo on new drag
 
 
@@ -759,24 +920,41 @@ def clear_selection(n):
 
 @app.callback(
     Output("sc-store", "data", allow_duplicate=True),
-    Output("proto-undo-store", "data", allow_duplicate=True),
-    Output("proto-redo-store", "data", allow_duplicate=True),
-    Output("uirev-store", "data", allow_duplicate=True),
+    Output("active-classes-store", "data", allow_duplicate=True),
+    Output("color-map-store", "data", allow_duplicate=True),
+    Output("master-undo-store", "data", allow_duplicate=True),
+    Output("master-redo-store", "data", allow_duplicate=True),
+    Output("master-view-id", "data", allow_duplicate=True),
     Input("undo-btn", "n_clicks"),
     State("sc-store", "data"),
-    State("proto-undo-store", "data"),
-    State("proto-redo-store", "data"),
-    State("uirev-store", "data"),
+    State("active-classes-store", "data"),
+    State("color-map-store", "data"),
+    State("master-undo-store", "data"),
+    State("master-redo-store", "data"),
+    State("master-view-id", "data"),
     prevent_initial_call=True,
 )
-def handle_undo(n_clicks, sc, undo_stack, redo_stack, uirev):
+def handle_undo(n_clicks, sc, classes, colors, undo_stack, redo_stack, view_id):
     if not n_clicks or not undo_stack:
         raise PreventUpdate
     undo_stack = list(undo_stack)
     redo_stack = list(redo_stack or [])
-    redo_stack.append(sc)          # push current sc for redo
-    prev_sc = undo_stack.pop()
-    return prev_sc, undo_stack, redo_stack, (uirev or 0) + 1
+    
+    # Store the exact state before we undo
+    current_action_label = undo_stack[-1].get("desc", "?")
+    redo_stack.append({
+        "desc": f"Redo: {current_action_label}",
+        "sc": sc, 
+        "classes": classes, 
+        "colors": colors,
+        "excluded": list(getattr(engine, "excluded_indices", set()))
+    })
+    
+    prev_state = undo_stack.pop()
+    if "excluded" in prev_state:
+        engine.excluded_indices = set(prev_state["excluded"])
+        
+    return prev_state.get("sc", {}), prev_state.get("classes", []), prev_state.get("colors", {}), undo_stack, redo_stack, (view_id or 0) + 1
 
 
 # ── 5. Redo button ───────────────────────────────────────────────
@@ -784,24 +962,66 @@ def handle_undo(n_clicks, sc, undo_stack, redo_stack, uirev):
 
 @app.callback(
     Output("sc-store", "data", allow_duplicate=True),
-    Output("proto-undo-store", "data", allow_duplicate=True),
-    Output("proto-redo-store", "data", allow_duplicate=True),
-    Output("uirev-store", "data", allow_duplicate=True),
+    Output("active-classes-store", "data", allow_duplicate=True),
+    Output("color-map-store", "data", allow_duplicate=True),
+    Output("master-undo-store", "data", allow_duplicate=True),
+    Output("master-redo-store", "data", allow_duplicate=True),
+    Output("master-view-id", "data", allow_duplicate=True),
     Input("redo-btn", "n_clicks"),
     State("sc-store", "data"),
-    State("proto-undo-store", "data"),
-    State("proto-redo-store", "data"),
-    State("uirev-store", "data"),
+    State("active-classes-store", "data"),
+    State("color-map-store", "data"),
+    State("master-undo-store", "data"),
+    State("master-redo-store", "data"),
+    State("master-view-id", "data"),
     prevent_initial_call=True,
 )
-def handle_redo(n_clicks, sc, undo_stack, redo_stack, uirev):
+def handle_redo(n_clicks, sc, classes, colors, undo_stack, redo_stack, view_id):
     if not n_clicks or not redo_stack:
         raise PreventUpdate
     undo_stack = list(undo_stack or [])
     redo_stack = list(redo_stack)
-    undo_stack.append(sc)          # push current sc for undo
-    next_sc = redo_stack.pop()
-    return next_sc, undo_stack, redo_stack, (uirev or 0) + 1
+    
+    next_state = redo_stack.pop()
+    
+    current_action_label = next_state.get("desc", "?").replace("Redo: ", "")
+    undo_stack.append({
+        "desc": current_action_label,
+        "sc": sc, 
+        "classes": classes, 
+        "colors": colors,
+        "excluded": list(getattr(engine, "excluded_indices", set()))
+    })
+    undo_stack = undo_stack[-_MAX_UNDO:]
+    
+    if "excluded" in next_state:
+        engine.excluded_indices = set(next_state["excluded"])
+        
+    return next_state.get("sc", {}), next_state.get("classes", []), next_state.get("colors", {}), undo_stack, redo_stack, (view_id or 0) + 1
+
+
+@app.callback(
+    Output("history-summary", "children"),
+    Output("history-list", "children"),
+    Input("master-undo-store", "data"),
+)
+def update_history_ui(undo_stack):
+    undo_stack = undo_stack or []
+    if not undo_stack:
+        return "History: Initial State", [html.Li("Clean session (actions will appear here)")]
+    
+    # Latest action logic
+    latest_action = undo_stack[-1].get("desc", "Unknown action")
+    if latest_action.startswith("Redo: "):
+        latest_action = latest_action[6:]
+    
+    list_items = []
+    # Reverse the stack to show newest history at the top
+    for i, state in enumerate(reversed(undo_stack)):
+        desc = state.get("desc", f"Action {len(undo_stack) - i}")
+        list_items.append(html.Li(desc))
+        
+    return f"History: {latest_action}", list_items
 
 
 # ── 7. Detail panel (inspector OR support set) ───────────────────
@@ -922,21 +1142,19 @@ def _render_inspector(sel_q, sc, temp, whatif_sc=None):
                 )
             )
 
-    # ── WHY WRONG section ─────────────────────────────────────────
-    # When misclassified: find the support items of the predicted wrong
-    # class that are closest in HD space to this query. These are the
-    # specific images that pulled the wrong prototype toward this point.
-    why_wrong = []
-    if not is_correct and info["pred"] and info["pred"] in sc:
-        pred_class = info["pred"]
-        pred_ci = engine.class_names.index(pred_class) if pred_class in engine.class_names else 0
-        pred_col = CLASS_COLORS[pred_ci % len(CLASS_COLORS)]
-        query_hd = engine.embeddings_hd[idx]
+    # ── GLOBAL 512D INFLUENCERS section ─────────────────────────────────────────
+    # Evaluates the Top 5 High-Dimensional neighbors dragging this point
+    # across ALL classes dynamically to explain multi-class probability splits.
+    influencers = []
+    query_hd = engine.embeddings_hd[idx]
 
-        # Compute cosine similarity between query and each wrong-class support
-        support_items = sc[pred_class]
-        sims = []
-        for it in support_items:
+    sims = []
+    for cname, items in sc.items():
+        if not items: continue
+        c_ci = engine.class_names.index(cname) if cname in engine.class_names else 0
+        c_col = CLASS_COLORS[c_ci % len(CLASS_COLORS)]
+        
+        for it in items:
             s_hd = engine.embeddings_hd[it["idx"]]
             norm_q = np.linalg.norm(query_hd)
             norm_s = np.linalg.norm(s_hd)
@@ -944,77 +1162,110 @@ def _render_inspector(sel_q, sc, temp, whatif_sc=None):
                 cos = float(np.dot(query_hd, s_hd) / (norm_q * norm_s))
             else:
                 cos = 0.0
-            sims.append((cos, it["idx"]))
+            sims.append((cos, it["idx"], cname, c_col))
 
-        # Top 3 most similar — the ones dragging the prototype closest
-        sims.sort(reverse=True)
-        top3 = sims[:3]
+    # Top 3 most similar globally (restricted to 3 to keep UI clean with heatmaps)
+    sims.sort(key=lambda x: x[0], reverse=True)
+    top_items = sims[:3]
 
-        why_rows = []
-        for cos, s_idx in top3:
-            bar_w = f"{max(0, cos) * 100:.0f}%"
-            why_rows.append(
-                html.Div(
-                    [
-                        html.Img(
-                            src=engine.image_to_base64(s_idx, size=32),
-                            className="why-thumb",
-                            title=f"{pred_class} support #{s_idx}",
-                        ),
-                        html.Div(
-                            [
-                                html.Div(
-                                    html.Div(
-                                        className="why-bar-fill",
-                                        style={"width": bar_w,
-                                               "background": pred_col},
-                                    ),
-                                    className="why-bar",
-                                    title=f"cos sim: {cos:.3f}",
-                                ),
-                                html.Span(
-                                    f"{cos:.2f}",
-                                    className="why-sim",
-                                ),
-                            ],
-                            className="why-bar-col",
-                        ),
-                        html.Button(
-                            f"#{s_idx}",
-                            id={"type": "view-wrong-btn",
-                                "idx": s_idx,
-                                "cls": pred_class},
-                            className="btn-small why-view-btn",
-                            n_clicks=0,
-                            title=f"go to {pred_class} #{s_idx}",
-                        ),
-                    ],
-                    className="why-row",
-                )
-            )
-
-        why_wrong = [
+    why_rows = []
+    for cos, s_idx, s_cname, s_col in top_items:
+        bar_w = f"{max(0, cos) * 100:.0f}%"
+        
+        # Geometrical Co-Activation Match Rendering
+        try:
+            hm_q, hm_s = engine.get_co_activation_images(idx, s_idx, size=40)
+        except Exception:
+            hm_q, hm_s = "", ""
+            
+        why_rows.append(
             html.Div(
                 [
                     html.Div(
                         [
-                            html.Span(
-                                f"pred: {pred_class}",
-                                className="why-header",
-                                style={"color": pred_col},
+                            html.Img(
+                                src=engine.image_to_base64(s_idx, size=32),
+                                className="why-thumb",
+                                title=f"{s_cname} support #{s_idx}",
                             ),
-                            html.Span(
-                                "support cos sim →",
-                                className="why-sub",
+                            html.Div(
+                                [
+                                    html.Div(
+                                        html.Div(
+                                            className="why-bar-fill",
+                                            style={"width": bar_w,
+                                                   "background": s_col},
+                                        ),
+                                        className="why-bar",
+                                        title=f"cos sim: {cos:.3f}",
+                                    ),
+                                    html.Span(
+                                        f"{cos:.2f}",
+                                        className="why-sim",
+                                    ),
+                                ],
+                                className="why-bar-col",
+                            ),
+                            html.Button(
+                                f"#{s_idx}",
+                                id={"type": "view-wrong-btn",
+                                    "idx": s_idx,
+                                    "cls": s_cname},
+                                className="btn-small why-view-btn",
+                                n_clicks=0,
+                                title=f"go to {s_cname} #{s_idx}",
                             ),
                         ],
-                        className="why-title-row",
+                        style={"display": "flex", "alignItems": "center", "gap": "6px", "width": "100%"}
                     ),
-                    html.Div(why_rows, className="why-list"),
+                    # Co-Activation Visualization Dual Row
+                    html.Div(
+                        [
+                            html.Div(
+                                [
+                                    html.Span("Query Match", style={"fontSize": "8px", "color": "#888", "marginBottom": "2px"}),
+                                    html.Img(src=hm_q, style={"width": "40px", "height": "40px", "borderRadius": "4px", "border": "1px solid #444"})
+                                ],
+                                style={"display": "flex", "flexDirection": "column", "alignItems": "center"}
+                            ),
+                            html.Span("↔", style={"color": s_col, "fontSize": "16px", "fontWeight": "bold", "margin": "0 10px", "opacity": "0.8"}),
+                            html.Div(
+                                [
+                                    html.Span("Support Match", style={"fontSize": "8px", "color": "#888", "marginBottom": "2px"}),
+                                    html.Img(src=hm_s, style={"width": "40px", "height": "40px", "borderRadius": "4px", "border": f"1px solid {s_col}"})
+                                ],
+                                style={"display": "flex", "flexDirection": "column", "alignItems": "center"}
+                            )
+                        ],
+                        style={"display": "flex", "justifyContent": "center", "alignItems": "center", "width": "100%", "marginTop": "6px", "backgroundColor": "rgba(0,0,0,0.15)", "padding": "6px", "borderRadius": "6px"}
+                    ) if hm_q else None
                 ],
-                className="why-section",
+                className="why-row",
+                style={"display": "flex", "flexDirection": "column", "marginBottom": "10px", "borderBottom": "1px solid #1a1a1a", "paddingBottom": "8px"}
             )
-        ]
+        )
+
+    why_wrong = [
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Span(
+                            "TOP 512D INFLUENCERS",
+                            className="why-header",
+                        ),
+                        html.Span(
+                            "support cos sim →",
+                            className="why-sub",
+                        ),
+                    ],
+                    className="why-title-row",
+                ),
+                html.Div(why_rows, className="why-list"),
+            ],
+            className="why-section",
+        )
+    ] if why_rows else []
 
     # Bottom action area
     ci = engine.class_names.index(true_class) if true_class in engine.class_names else 0
@@ -1179,8 +1430,11 @@ def _render_canvas_tool(sel_class, sc, whatif_sc=None, saved_class_name=""):
                 width=240, height=240,
                 style={"background": "#000000", "border": "1px solid #3a4235", "cursor": "crosshair"}
             ),
+            html.Div(id="draw-live-confidence",
+                     className="hint-text",
+                     style={"textAlign": "center", "marginTop": "6px", "color": "#aaaaaa"}),
         ],
-        style={"display": "flex", "justifyContent": "center", "marginTop": "12px"}
+        style={"display": "flex", "flexDirection": "column", "alignItems": "center", "marginTop": "12px"}
     )
     
     controls = html.Div([
@@ -1280,29 +1534,25 @@ def _render_support(sel_class, sc, sel_sup, temp,
                 staged_add_idx = aidx
                 break
 
-    # Delta for pending-remove overlay
-    remove_delta = None
-    if pending_rm is not None and whatif_sc:
+    # Compute whatif accuracy delta once — reused for both remove and add overlays
+    _whatif_delta = None
+    if whatif_sc and (pending_rm is not None or staged_add_idx is not None):
         try:
-            cur_acc  = engine.classify(sc, temp)["overall"]
-            proj_acc = engine.classify(whatif_sc, temp)["overall"]
-            remove_delta = proj_acc - cur_acc
+            _cur_acc  = engine.classify(sc, temp)["overall"]
+            _proj_acc = engine.classify(whatif_sc, temp)["overall"]
+            _whatif_delta = _proj_acc - _cur_acc
         except Exception:
-            remove_delta = 0.0
+            _whatif_delta = 0.0
+
+    # Delta for pending-remove overlay
+    remove_delta = _whatif_delta if pending_rm is not None and whatif_sc else None
 
     children = []
 
     # Pending-add item at top
     if staged_add_idx is not None:
         add_thumb = engine.image_to_base64(staged_add_idx)
-        add_delta = None
-        if whatif_sc:
-            try:
-                cur_acc  = engine.classify(sc, temp)["overall"]
-                proj_acc = engine.classify(whatif_sc, temp)["overall"]
-                add_delta = proj_acc - cur_acc
-            except Exception:
-                add_delta = 0.0
+        add_delta = _whatif_delta
         delta_col = OK_COL if (add_delta or 0) > 0.005 else (
             ERR_COL if (add_delta or 0) < -0.005 else TEXT2)
         children.append(
@@ -1515,19 +1765,37 @@ def stage_add_support(n, sel_q, sc):
 @app.callback(
     Output("sel-query-store", "data", allow_duplicate=True),
     Output("uirev-store", "data", allow_duplicate=True),
+    Output("master-undo-store", "data", allow_duplicate=True),
     Input("replace-image-btn", "n_clicks"),
     State("sel-query-store", "data"),
     State("uirev-store", "data"),
+    State("sc-store", "data"),
+    State("active-classes-store", "data"),
+    State("color-map-store", "data"),
+    State("master-undo-store", "data"),
     prevent_initial_call=True,
 )
-def replace_image_callback(n, sel_q, uirev):
+def replace_image_callback(n, sel_q, uirev, sc, classes, colors, undo_stack):
     if not n or sel_q is None:
         raise PreventUpdate
     idx = int(sel_q)
+    cname = engine.class_names[engine.labels[idx]]
+    old_excluded = list(getattr(engine, "excluded_indices", set()))
+    
     new_idx = engine.exclude_image(idx)
     print(f"DEBUG: replace_image_callback: idx={idx}, new_idx={new_idx}")
-    # Switch focus to the replacement image if loaded, else clear inspector
-    return new_idx, (uirev or 0) + 1
+    
+    undo_stack = list(undo_stack or [])
+    undo_stack.append({
+        "desc": f"Replaced #{idx} ({cname})",
+        "sc": sc, 
+        "classes": classes or list(engine.class_names), 
+        "colors": colors or {},
+        "excluded": old_excluded
+    })
+    undo_stack = undo_stack[-_MAX_UNDO:]
+    
+    return new_idx, (uirev or 0) + 1, undo_stack
 
 
 # ── 8b. Navigate to wrong-class support item ────────────────────
@@ -1624,7 +1892,7 @@ def set_pending_remove(clicks, ids, sc):
 # ── 13. Confirm remove ───────────────────────────────────────────
 
 
-def _do_commit(whatif_sc, sc, temp, undo_stack, changelog, uirev, drawn_url=None):
+def _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id, drawn_url=None):
     """Shared commit logic used by both confirm-rm and confirm-add."""
     # Intercept drawn items in added list
     final_whatif = {c: list(v) for c, v in whatif_sc.items()}
@@ -1661,7 +1929,7 @@ def _do_commit(whatif_sc, sc, temp, undo_stack, changelog, uirev, drawn_url=None
 
     parts = ([f"+ {c} #{i}" for c, i in added] +
              [f"− {c} #{i}" for c, i in removed])
-    label = "  ".join(parts)
+    label = "  ".join(parts) if parts else "Modified Support configuration"
     try:
         cur_acc  = engine.classify(sc, temp)["overall"]
         proj_acc = engine.classify(whatif_sc, temp)["overall"]
@@ -1671,42 +1939,44 @@ def _do_commit(whatif_sc, sc, temp, undo_stack, changelog, uirev, drawn_url=None
     entry = {"label": label, "delta": round(delta, 4),
              "acc": round(proj_acc, 4)}
     new_log  = ([entry] + list(changelog or []))[:20]
-    new_undo = list(undo_stack or []) + [sc]
-    new_uirev = (uirev or 0) + 1
+    new_undo = (list(undo_stack or []) + [{"desc": label, "sc": sc, "classes": classes, "colors": colors}])[-_MAX_UNDO:]
+    new_view_id = (view_id or 0) + 1
 
     # Persist session
     engine.default_support = whatif_sc
-    engine.save_session(_SESSION_PATH)
+    engine.save_session(_SESSION_PATH, {"sc": whatif_sc, "classes": classes, "colors": colors})
 
-    return whatif_sc, new_undo, [], None, new_log, new_uirev
+    return whatif_sc, new_undo, [], None, new_log, new_view_id
+
 
 
 @app.callback(
     Output("sc-store",             "data", allow_duplicate=True),
-    Output("proto-undo-store",     "data", allow_duplicate=True),
-    Output("proto-redo-store",     "data", allow_duplicate=True),
+    Output("master-undo-store",     "data", allow_duplicate=True),
+    Output("master-redo-store",     "data", allow_duplicate=True),
     Output("whatif-store",         "data", allow_duplicate=True),
     Output("changelog-store",      "data", allow_duplicate=True),
-    Output("uirev-store",          "data", allow_duplicate=True),
+    Output("master-view-id",          "data", allow_duplicate=True),
     Output("pending-remove-store", "data", allow_duplicate=True),
     Input({"type": "confirm-rm-btn", "idx": ALL}, "n_clicks"),
     State("whatif-store",      "data"),
     State("sc-store",          "data"),
+    State("active-classes-store", "data"),
+    State("color-map-store",   "data"),
     State("temp-slider",       "value"),
-    State("proto-undo-store",  "data"),
+    State("master-undo-store",  "data"),
     State("changelog-store",   "data"),
-    State("uirev-store",       "data"),
+    State("master-view-id",       "data"),
     prevent_initial_call=True,
 )
-def confirm_remove(clicks, whatif_sc, sc, temp, undo_stack, changelog, uirev):
+def confirm_remove(clicks, whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id):
     ctx = callback_context
     if not ctx.triggered or not any(v for v in clicks if v):
         raise PreventUpdate
     if not whatif_sc:
         raise PreventUpdate
-    sc_new, undo, redo, wh, log, rev = _do_commit(
-        whatif_sc, sc, temp, undo_stack, changelog, uirev)
-    return sc_new, undo, redo, wh, log, rev, None
+    out = _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id)
+    return out[0], out[1], out[2], out[3], out[4], out[5], None
 
 
 # ── 14. Cancel remove ────────────────────────────────────────────
@@ -1730,25 +2000,27 @@ def cancel_remove(clicks):
 
 @app.callback(
     Output("sc-store",         "data", allow_duplicate=True),
-    Output("proto-undo-store", "data", allow_duplicate=True),
-    Output("proto-redo-store", "data", allow_duplicate=True),
+    Output("master-undo-store", "data", allow_duplicate=True),
+    Output("master-redo-store", "data", allow_duplicate=True),
     Output("whatif-store",     "data", allow_duplicate=True),
     Output("changelog-store",  "data", allow_duplicate=True),
-    Output("uirev-store",      "data", allow_duplicate=True),
+    Output("master-view-id",      "data", allow_duplicate=True),
     Input("confirm-add-btn",   "n_clicks"),
     State("whatif-store",      "data"),
     State("sc-store",          "data"),
+    State("active-classes-store", "data"),
+    State("color-map-store",   "data"),
     State("temp-slider",       "value"),
-    State("proto-undo-store",  "data"),
+    State("master-undo-store",  "data"),
     State("changelog-store",   "data"),
-    State("uirev-store",       "data"),
+    State("master-view-id",       "data"),
     State("drawing-strokes-store", "data"),
     prevent_initial_call=True,
 )
-def confirm_add(n, whatif_sc, sc, temp, undo_stack, changelog, uirev, drawn_url):
+def confirm_add(n, whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id, drawn_url):
     if not n or not whatif_sc:
         raise PreventUpdate
-    return _do_commit(whatif_sc, sc, temp, undo_stack, changelog, uirev, drawn_url)
+    return _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id, drawn_url)
 
 
 # ── 16. Cancel add ───────────────────────────────────────────────
@@ -2038,14 +2310,18 @@ def toggle_chip_draft(clicks, ids, active, pending):
     Output("sc-store",              "data",  allow_duplicate=True),
     Output("class-selector",        "options", allow_duplicate=True),
     Output("class-selector",        "value",  allow_duplicate=True),
+    Output("master-undo-store",     "data", allow_duplicate=True),
+    Output("master-redo-store",     "data", allow_duplicate=True),
     Input("apply-classes-btn", "n_clicks"),
     State("active-classes-store",  "data"),
     State("pending-classes-store", "data"),
     State("sc-store",              "data"),
+    State("color-map-store",       "data"),
     State("class-selector",        "value"),
+    State("master-undo-store",     "data"),
     prevent_initial_call=True,
 )
-def apply_class_changes(n, active, pending, sc, sel_class):
+def apply_class_changes(n, active, pending, sc, colors, sel_class, undo_stack):
     if not n:
         raise PreventUpdate
     active_set  = set(active  or engine.class_names)
@@ -2054,7 +2330,19 @@ def apply_class_changes(n, active, pending, sc, sel_class):
         raise PreventUpdate
 
     cap = len(CLASS_COLORS)
-    sc  = dict(sc or {})
+    old_sc  = dict(sc or {})
+    sc = dict(sc or {})
+
+    # Push to undo stack before executing changes
+    undo_stack = list(undo_stack or [])
+    undo_stack.append({
+        "desc": "Modified Active Classes Map",
+        "sc": old_sc, 
+        "classes": active or list(engine.class_names), 
+        "colors": colors or {},
+        "excluded": list(getattr(engine, "excluded_indices", set()))
+    })
+    undo_stack = undo_stack[-_MAX_UNDO:]
 
     # Remove classes no longer wanted
     to_remove = active_set - pending_set
@@ -2074,8 +2362,9 @@ def apply_class_changes(n, active, pending, sc, sel_class):
         ci_r = engine.class_names.index(cname_r)
         old_items = sc.get(cname_r, [])
         valid = [it for it in old_items
-                 if it["idx"] < n_imgs
+                 if isinstance(it.get("idx"), int) and it["idx"] < n_imgs
                  and int(engine.labels[it["idx"]]) == ci_r]
+        valid += [it for it in old_items if isinstance(it.get("idx"), str)]
         new_sc[cname_r] = valid or engine.default_support.get(cname_r, [])
     sc = new_sc
 
@@ -2090,13 +2379,11 @@ def apply_class_changes(n, active, pending, sc, sel_class):
         else:
             print(f"add_class failed for {name!r}")
 
-    engine.save_class_selection(_CLASS_SEL_PATH)
-
     new_active  = list(engine.class_names)
     new_pending = new_active[:]               
     options     = [{"label": c, "value": c} for c in new_active]
     new_sel     = sel_class if sel_class in new_active else (new_active[0] if new_active else None)
-    return new_active, new_pending, sc, options, new_sel
+    return new_active, new_pending, sc, options, new_sel, undo_stack, []
 
 
 # ── P4-8. Cycle class color ───────────────────────────────────────
@@ -2104,13 +2391,17 @@ def apply_class_changes(n, active, pending, sc, sel_class):
 
 @app.callback(
     Output("color-map-store", "data", allow_duplicate=True),
+    Output("master-undo-store", "data", allow_duplicate=True),
+    Output("master-redo-store", "data", allow_duplicate=True),
     Input({"type": "color-swatch-btn", "name": ALL}, "n_clicks"),
     State({"type": "color-swatch-btn", "name": ALL}, "id"),
+    State("sc-store", "data"),
     State("active-classes-store", "data"),
     State("color-map-store",      "data"),
+    State("master-undo-store", "data"),
     prevent_initial_call=True,
 )
-def cycle_class_color(clicks, ids, active, color_map):
+def cycle_class_color(clicks, ids, sc, active, color_map, undo_stack):
     ctx = callback_context
     if not ctx.triggered:
         raise PreventUpdate
@@ -2126,8 +2417,14 @@ def cycle_class_color(clicks, ids, active, color_map):
         raise PreventUpdate
 
     active_list = list(active or engine.class_names)
+    old_color_map = dict(color_map or {})
     color_map   = dict(color_map or {})
     cap         = len(CLASS_COLORS)
+
+    # Push to undo stack
+    undo_stack = list(undo_stack or [])
+    undo_stack.append({"sc": sc, "classes": active_list, "colors": old_color_map})
+    undo_stack = undo_stack[-_MAX_UNDO:]
 
     # Current color index for this class
     cur_idx = color_map.get(
@@ -2146,7 +2443,7 @@ def cycle_class_color(clicks, ids, active, color_map):
         next_idx = (next_idx + 1) % cap
 
     color_map[name] = next_idx
-    return color_map
+    return color_map, undo_stack, []
 
 
 # ── P4-5. Manual save button ─────────────────────────────────────
@@ -2156,13 +2453,19 @@ def cycle_class_color(clicks, ids, active, color_map):
     Output("save-indicator", "children", allow_duplicate=True),
     Input("manual-save-btn", "n_clicks"),
     State("sc-store", "data"),
+    State("active-classes-store", "data"),
+    State("color-map-store", "data"),
     prevent_initial_call=True,
 )
-def manual_save(n, sc):
+def manual_save(n, sc, classes, colors):
     if not n:
         raise PreventUpdate
-    engine.default_support = sc or {}
-    engine.save_session(_SESSION_PATH)
+    app_state = {
+        "sc": sc or {},
+        "classes": classes or list(engine.class_names),
+        "colors": colors or {}
+    }
+    engine.save_session(_SESSION_PATH, app_state)
     return "● SAVED"
 
 
@@ -2184,8 +2487,8 @@ def sync_class_selector_options(active):
 @app.callback(
     Output("sc-store",             "data", allow_duplicate=True),
     Output("proto-ov-store",       "data", allow_duplicate=True),
-    Output("proto-undo-store",     "data", allow_duplicate=True),
-    Output("proto-redo-store",     "data", allow_duplicate=True),
+    Output("master-undo-store",     "data", allow_duplicate=True),
+    Output("master-redo-store",     "data", allow_duplicate=True),
     Output("sel-query-store",      "data", allow_duplicate=True),
     Output("whatif-store",         "data", allow_duplicate=True),
     Output("changelog-store",      "data", allow_duplicate=True),
@@ -2392,24 +2695,26 @@ def toggle_graph_item(click, sel_class, sc, whatif_sc):
 
 @app.callback(
     Output("sc-store",             "data", allow_duplicate=True),
-    Output("proto-undo-store",     "data", allow_duplicate=True),
-    Output("proto-redo-store",     "data", allow_duplicate=True),
+    Output("master-undo-store",     "data", allow_duplicate=True),
+    Output("master-redo-store",     "data", allow_duplicate=True),
     Output("whatif-store",         "data", allow_duplicate=True),
     Output("changelog-store",      "data", allow_duplicate=True),
-    Output("uirev-store",          "data", allow_duplicate=True),
+    Output("master-view-id",          "data", allow_duplicate=True),
     Input("apply-graph-btn", "n_clicks"),
     State("whatif-store", "data"),
     State("sc-store", "data"),
+    State("active-classes-store", "data"),
+    State("color-map-store", "data"),
     State("temp-slider", "value"),
-    State("proto-undo-store", "data"),
+    State("master-undo-store", "data"),
     State("changelog-store", "data"),
-    State("uirev-store", "data"),
+    State("master-view-id", "data"),
     prevent_initial_call=True,
 )
-def apply_graph_changes(n, whatif_sc, sc, temp, undo_stack, changelog, uirev):
+def apply_graph_changes(n, whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id):
     if not n or not whatif_sc:
         raise PreventUpdate
-    return _do_commit(whatif_sc, sc, temp, undo_stack, changelog, uirev)
+    return _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id)
 
 
 @app.callback(
@@ -2609,22 +2914,7 @@ def toggle_new_class_controls(assign_class):
     return {"display": "none"}, {"display": "block", "width": "100%", "marginTop": "6px"}
 
 
-@app.callback(
-    Output("draw-live-confidence", "style"),
-    Output("draw-stage-status",    "style"),
-    Output("draw-staged-thumbs-static", "style"),
-    Input("sidebar-mode-store", "data"),
-)
-def toggle_draw_status_panels(mode):
-    """Show the permanent draw-status divs only while the draw panel is open."""
-    if mode == "draw":
-        conf  = {"display": "block", "textAlign": "center", "marginTop": "6px", "color": "#aaaaaa"}
-        stage = {"display": "block", "textAlign": "center", "marginTop": "4px", "color": "#00ff88"}
-        thumbs = {"display": "flex", "gap": "6px", "marginTop": "12px",
-                  "overflowX": "auto", "padding": "4px"}
-        return conf, stage, thumbs
-    hidden = {"display": "none"}
-    return hidden, hidden, hidden
+
 
 @app.callback(
     Output("new-class-name-store", "data"),
@@ -2639,8 +2929,7 @@ def save_new_class_name(val):
 @app.callback(
     Output("whatif-store", "data", allow_duplicate=True),
     Output("new-class-drawings-store", "data", allow_duplicate=True),
-    Output("draw-stage-status", "children", allow_duplicate=True),
-    Output("draw-staged-thumbs-static", "children", allow_duplicate=True),
+    Output("stage-draw-btn", "children"),
     Output("create-class-btn", "disabled"),
     Output("new-class-progress", "children"),
     Output("sidebar-mode-store", "data", allow_duplicate=True),
@@ -2665,15 +2954,9 @@ def stage_drawn_image(n, ghost_data, active_class_list, sc, data_url, whatif_sc,
     if assign_class == "CREATE_NEW":
         new_drawings = new_drawings or []
         new_drawings.append(data_url)
-        thumbs = [
-            html.Img(src=url, style={
-                "width": "36px", "height": "36px", "background": "black",
-                "border": "1px solid #444", "borderRadius": "4px", "flexShrink": "0"
-            }) for url in new_drawings
-        ]
         disabled = len(new_drawings) < 2
         progress = f"{len(new_drawings)} of 2 drawn"
-        return no_update, new_drawings, "✓ Staged for new class", thumbs, disabled, progress, no_update, no_update
+        return no_update, new_drawings, "✓ STAGED", disabled, progress, no_update, no_update
         
     # Decode the drawing and register it with the engine immediately so it
     # gets a real integer index — avoids the string-idx crash in _render_support.
@@ -2702,24 +2985,14 @@ def stage_drawn_image(n, ghost_data, active_class_list, sc, data_url, whatif_sc,
         "base64": data_url,
     })
 
-    # Build thumbs from the updated support list for this class
-    thumbs = [
-        html.Img(src=it["base64"], style={
-            "width": "36px", "height": "36px", "background": "black",
-            "border": "1px solid #444", "borderRadius": "4px", "flexShrink": "0"
-        })
-        for it in new_sc.get(assign_class, [])
-        if it.get("base64")
-    ]
-
     # Write straight to sc-store (no whatif staging needed) and keep sidebar
     # in draw mode without touching sidebar-mode-store so the canvas survives.
-    return no_update, no_update, f"✓ Added to {assign_class.upper()}", thumbs, no_update, no_update, no_update, new_sc
+    return no_update, no_update, f"✓ ADDED TO {assign_class.upper()}", no_update, no_update, no_update, new_sc
 
 
 @app.callback(
     Output("engine-version-store", "data", allow_duplicate=True),
-    Output("draw-stage-status", "children", allow_duplicate=True),
+    Output("add-query-btn", "children"),
     Input("add-query-btn", "n_clicks"),
     State("drawing-ghost-store", "data"),
     State({"type": "assign-class-dropdown", "index": ALL}, "value"),
