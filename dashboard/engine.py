@@ -1,6 +1,7 @@
 import numpy as np
 from PIL import Image
 import io
+import shutil
 import json
 import base64
 from pathlib import Path
@@ -18,22 +19,29 @@ CLASS_NAMES = [
 ]
 
 CLASS_COLORS = [
-    '#ff6b6b',   # cat      — coral red
-    '#51cf66',   # dog      — green
-    '#339af0',   # fish     — blue
-    '#fcc419',   # car      — yellow
-    '#cc5de8',   # flower   — purple
-    '#20c997',   # bicycle  — teal
-    '#ff922b',   # bird     — orange
-    '#74c0fc',   # pizza    — sky blue
-    '#f783ac',   # clock    — pink
-    '#a9e34b',   # lightning — lime
+    '#f25a5a',  # red
+    '#f2975a',  # orange
+    '#f2d35a',  # amber
+    '#d3f25a',  # yellow-green
+    '#97f25a',  # lime
+    '#5af25a',  # green
+    '#5af297',  # spring-green
+    '#5af2d3',  # cyan-mint
+    '#5ad3f2',  # sky
+    '#5a97f2',  # blue
+    '#5a5af2',  # blue-violet
+    '#975af2',  # violet
+    '#d35af2',  # magenta
+    '#f25ad3',  # pink
+    '#f25a97',  # rose
 ]
 
 # ── Paths ─────────────────────────────────────────────────────────
 _ROOT = Path(__file__).resolve().parent.parent
 _CHECKPOINT = _ROOT / 'checkpoints' / 'best_model.pt'
 _DATA_DIR = _ROOT / 'data' / 'quickdraw' / 'test'
+_CUSTOM_DRAWINGS_DIR = _ROOT / 'custom_drawings'
+_EXCLUDED_PATH = _ROOT / 'excluded_images.json'
 _MAX_PER_CLASS = 40   # images to load per class (out of ~75 available)
 _INITIAL_SUPPORT = 5
 
@@ -51,22 +59,33 @@ class AnalyticsEngine:
         self.embeddings_hd: Optional[np.ndarray] = None   # (N, 512)
         self.embeddings_2d: Optional[np.ndarray] = None    # (N, 2)
         self.default_support: Dict[str, list] = {}
+        self.image_paths: List[Path] = []
+        self.excluded_indices: set = set()
 
-        # Set by init_demo — needed for Grad-CAM and masked embeddings
-        self._encoder = None       # torch.nn.Module (conv4)
-        self._transform = None     # torchvision transform pipeline
-        self._last_conv = None     # reference to last Conv2d layer
-        self._pre_gap_layer = None # last module outputting 4-D tensor (before GAP)
-        self._fmap_hw = (4, 4)     # spatial dims of feature map before GAP
-        self._masked_emb_cache: Dict[str, np.ndarray] = {}  # (idx, mask_key) → emb
-        self._gradcam_tile_cache: Dict[str, Dict[str, str]] = {}  # (idx, sc_key) → tiles
+        # Set by init_demo
+        self._encoder = None        # torch.nn.Module (conv4)
+        self._transform = None      # torchvision transform pipeline
+        self._umap_reducer = None   # fitted UMAP reducer for .transform()
+        self._kd_tree = None        # KDTree over embeddings_2d for mesh lookup
+
+        # In-process caches (cleared when arrays are mutated)
+        self._b64_cache: dict = {}      # (idx, size) -> base64 string
+        self._coact_cache: dict = {}    # (q_idx, s_idx, size) -> (str, str)
 
     # ------------------------------------------------------------------
     # Initialisation — loads real model, images, computes embeddings
     # ------------------------------------------------------------------
 
-    def init_demo(self) -> "AnalyticsEngine":
-        """Load real model & QuickDraw data, compute embeddings, run UMAP."""
+    def init_demo(self, active_classes: Optional[List[str]] = None
+                  ) -> "AnalyticsEngine":
+        """Load real model & QuickDraw data, compute embeddings, run UMAP.
+
+        If *active_classes* is provided it overrides CLASS_NAMES.
+        """
+        if active_classes:
+            self.class_names = [c for c in active_classes if (_DATA_DIR / c).exists()]
+            self.n_classes = len(self.class_names)
+            self.class_colors = list(CLASS_COLORS[:self.n_classes])
         import torch
         import torchvision.transforms as T
         from models.encoder import get_encoder
@@ -98,10 +117,8 @@ class AnalyticsEngine:
             encoder.load_state_dict(cp['encoder_state_dict'])
         encoder.eval()
 
-        # Persist for Grad-CAM / masking later
+        # Persist encoder and transform for later inference (drawn sketches)
         self._encoder = encoder
-        self._last_conv = self._find_last_conv(encoder)
-        self._pre_gap_layer, self._fmap_hw = self._find_pre_gap(encoder)
 
         transform = T.Compose([
             T.Resize((64, 64)),
@@ -113,17 +130,39 @@ class AnalyticsEngine:
         # ── load images ──────────────────────────────────────────
         self.images = []
         labels: List[int] = []
+        self.image_paths = []
+        self.excluded_indices = set()
+
+        # Load excluded images
+        excluded = set()
+        if _EXCLUDED_PATH.exists():
+            try:
+                with open(_EXCLUDED_PATH) as f:
+                    excluded = set(json.load(f))
+            except Exception as e:
+                logger.warning("Failed to load excluded images: %s", e)
 
         for ci, cname in enumerate(self.class_names):
             cls_dir = _DATA_DIR / cname
             if not cls_dir.exists():
                 logger.warning("Class directory not found: %s", cls_dir)
                 continue
-            img_files = sorted(cls_dir.glob('*.png'))[:_MAX_PER_CLASS]
+            img_files = sorted(cls_dir.glob('*.png'))
+            valid_count = 0
             for f in img_files:
+                rel_path = str(f.relative_to(_DATA_DIR))
                 arr = np.array(Image.open(f).convert('L'))
                 self.images.append(arr)
                 labels.append(ci)
+                self.image_paths.append(f)
+                
+                if rel_path in excluded:
+                    self.excluded_indices.add(len(self.images) - 1)
+                else:
+                    valid_count += 1
+                    
+                if valid_count >= _MAX_PER_CLASS:
+                    break
 
         self.labels = np.array(labels, dtype=int)
         n = len(self.images)
@@ -164,477 +203,353 @@ class AnalyticsEngine:
     def _compute_umap(self):
         try:
             from umap import UMAP
-            reducer = UMAP(n_components=2, random_state=42,
-                           n_neighbors=15, min_dist=0.3)
         except ImportError:
-            from sklearn.manifold import TSNE
-            reducer = TSNE(n_components=2, random_state=42, perplexity=30)
+            raise ImportError(
+                "umap-learn is required. Install it with: pip install umap-learn"
+            )
+        reducer = UMAP(n_components=2, random_state=42,
+                       n_neighbors=15, min_dist=0.3)
+        self._umap_reducer = reducer
         self.embeddings_2d = reducer.fit_transform(self.embeddings_hd)
+        from scipy.spatial import cKDTree
+        self._kd_tree = cKDTree(self.embeddings_2d)
+        self._b64_cache = {}
+        self._coact_cache = {}
+
 
     # ------------------------------------------------------------------
-    # Encoder introspection helpers
+    # Persistence — session
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _find_last_conv(model) -> "torch.nn.Module":
-        """Walk the module tree and return the last Conv2d layer."""
-        import torch.nn as nn
-        last = None
-        for m in model.modules():
-            if isinstance(m, nn.Conv2d):
-                last = m
-        if last is None:
-            raise RuntimeError("No Conv2d layer found in encoder")
-        return last
-
-    @staticmethod
-    def _find_pre_gap(model) -> Tuple:
-        """
-        Probe the encoder to find the last module that outputs a 4-D
-        tensor (B, C, H, W).  That module's output is the feature map
-        right before global average pooling.
-
-        Returns (module, (H, W)).
-        """
-        import torch
-
-        candidates = []       # [(module, (H, W))]
-        hooks = []
-
-        def _make_hook(mod):
-            def _hook(_m, _inp, out):
-                if isinstance(out, torch.Tensor) and out.dim() == 4:
-                    candidates.append((mod, (out.shape[2], out.shape[3])))
-            return _hook
-
-        for m in model.modules():
-            hooks.append(m.register_forward_hook(_make_hook(m)))
-
-        with torch.no_grad():
-            model(torch.randn(1, 1, 64, 64))
-
-        for h in hooks:
-            h.remove()
-
-        if not candidates:
-            raise RuntimeError("No 4-D feature map found in encoder")
-
-        # Last 4-D output = feature map immediately before GAP
-        layer, hw = candidates[-1]
-        logger.info("Pre-GAP layer: %s  feature map: %s", layer, hw)
-        return layer, hw
-
-    # ------------------------------------------------------------------
-    # Grad-CAM  (Phase 1)
-    # ------------------------------------------------------------------
-
-    def compute_gradcam(
-        self,
-        idx: int,
-        sc: Dict,
-        target_class: Optional[str] = None,
-        contrastive: bool = True,
-        normalize: bool = True,
-    ) -> np.ndarray:
-        """
-        Compute a Grad-CAM heatmap for image *idx*.
-
-        Parameters
-        ----------
-        idx : int
-            Index into ``self.images``.
-        sc : dict
-            Current support-set configuration (needed to build prototypes).
-        target_class : str or None
-            Class to explain.  If None, uses the image's ground-truth class.
-
-        Returns
-        -------
-        heatmap : np.ndarray, shape (64, 64), values in [0, 1]
-            Upsampled, normalised Grad-CAM heatmap aligned to the input image.
-        """
-        import torch
-
-        # ── resolve target class ──────────────────────────────────
-        if target_class is None:
-            target_class = self.class_names[self.labels[idx]]
-
-        _, phd, order = self.compute_prototypes(sc)
-        if target_class not in order:
-            return np.zeros((64, 64), dtype=np.float32)
-        ti = order.index(target_class)
-        # All prototypes as a single tensor — needed for softmax score
-        all_protos = torch.tensor(phd, dtype=torch.float32)  # (C, 512)
-
-        # ── prepare input tensor ──────────────────────────────────
-        img_pil = Image.fromarray(self.images[idx].astype(np.uint8), mode='L')
-        x = self._transform(img_pil).unsqueeze(0)          # (1, 1, 64, 64)
-        x.requires_grad_(True)
-
-        # ── register hooks on last conv layer ─────────────────────
-        fmaps = []    # forward:  feature maps  (1, C, H, W)
-        grads = []    # backward: gradients      (1, C, H, W)
-
-        def _fwd_hook(_mod, _inp, out):
-            fmaps.append(out)
-
-        def _bwd_hook(_mod, _gin, gout):
-            grads.append(gout[0])
-
-        h_fwd = self._pre_gap_layer.register_forward_hook(_fwd_hook)
-        h_bwd = self._pre_gap_layer.register_full_backward_hook(_bwd_hook)
-
+    def save_session(self, path: str, state: Dict) -> None:
+        """Serialize central application state to disk."""
         try:
-            # ── forward pass ──────────────────────────────────────
-            self._encoder.zero_grad()
-            embedding = self._encoder(x)                    # (1, 512)
+            with open(path, 'w') as f:
+                json.dump(state, f)
+        except Exception as e:
+            logger.warning("save_session failed: %s", e)
 
-            # ── score: log_softmax (contrastive) or -dist (single) ──
-            emb = embedding.squeeze()                           # (512,)
-            dists = torch.sum(
-                (all_protos - emb.unsqueeze(0)) ** 2, dim=1
-            )                                                   # (C,)
-            if contrastive and len(all_protos) > 1:
-                # log P(target | x) — gradient flows through all
-                # competing prototypes proportionally.  Best for
-                # comparing classes side-by-side in the inspector.
-                score = torch.log_softmax(-dists, dim=0)[ti]
-                logger.debug(
-                    "gradcam idx=%d target=%s  log_prob=%.4f  "
-                    "dists(min=%.1f max=%.1f)",
-                    idx, target_class,
-                    score.item(),
-                    dists.min().item(), dists.max().item(),
-                )
-            else:
-                # -dist_target — always produces a non-trivial map,
-                # ideal for single-class mask editor / support view.
-                score = -dists[ti]
-                logger.debug(
-                    "gradcam idx=%d target=%s  non-contrastive "
-                    "dist_target=%.4f",
-                    idx, target_class, dists[ti].item(),
-                )
-            score.backward()
-        finally:
-            h_fwd.remove()
-            h_bwd.remove()
-
-        # ── Grad-CAM computation ──────────────────────────────────
-        feat = fmaps[0].detach()[0]   # (C, H, W)  — [0] removes batch only
-        grad = grads[0].detach()[0]   # (C, H, W)
-
-        # Channel weights = global-average-pooled gradients
-        weights = grad.mean(dim=(1, 2))      # (C,)
-
-        # Weighted combination → ReLU
-        cam = torch.relu((weights[:, None, None] * feat).sum(dim=0))  # (H, W)
-
-        # Upsample to image resolution then smooth out 4×4 block artefacts
-        cam = cam.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-        cam = torch.nn.functional.interpolate(
-            cam, size=(64, 64), mode='bicubic', align_corners=False
-        ).squeeze().clamp(min=0)             # (64, 64) — bicubic can go negative
-        # Gaussian blur to suppress 16-px grid seams from 4×4 feature maps
-        cam_np_tmp = cam.numpy()
-        from scipy.ndimage import gaussian_filter
-        cam_np_tmp = gaussian_filter(cam_np_tmp, sigma=2.0)
-        cam_np = cam_np_tmp
-
-        # Normalise to [0, 1] (optional)
-        if normalize:
-            cmin, cmax = cam_np.min(), cam_np.max()
-            if cmax - cmin > 1e-8:
-                cam_np = (cam_np - cmin) / (cmax - cmin)
-            else:
-                logger.debug(
-                    "gradcam idx=%d target=%s  flat heatmap (cmax-cmin=%.2e) "
-                    "— returning zeros",
-                    idx, target_class, float(cmax - cmin),
-                )
-                cam_np = np.zeros_like(cam_np)
-
-        logger.debug(
-            "gradcam idx=%d target=%s  heatmap stats: "
-            "mean=%.4f  max=%.4f  nonzero_frac=%.2f  "
-            "feat_shape=%s  grad_shape=%s",
-            idx, target_class,
-            float(cam_np.mean()), float(cam_np.max()),
-            float((cam_np > 0.1).mean()),
-            tuple(feat.shape), tuple(grad.shape),
-        )
-        return cam_np.astype(np.float32)
-
-    # ------------------------------------------------------------------
-
-    def gradcam_overlay_base64(
-        self,
-        idx: int,
-        sc: Dict,
-        target_class: Optional[str] = None,
-        size: int = 128,
-        alpha: float = 0.55,
-    ) -> str:
-        """
-        Return a base-64 PNG of the Grad-CAM heatmap overlaid on the
-        original sketch, ready for <img src=...> embedding.
-
-        Parameters
-        ----------
-        idx   : image index
-        sc    : support-set config
-        target_class : class to explain (None → ground truth)
-        size  : output pixel size (square)
-        alpha : overlay opacity (0 = sketch only, 1 = heatmap only)
-        """
-        import matplotlib.cm as cm
-
-        heatmap = self.compute_gradcam(idx, sc, target_class, contrastive=False)  # (64, 64) [0..1]
-
-        # Sketch as grey RGB
-        sketch = self.images[idx].astype(np.float32)
-        sketch = np.stack([sketch] * 3, axis=-1)               # (64, 64, 3)
-        sketch /= 255.0
-
-        # Heatmap as RGB via 'viridis' colourmap (perceptually uniform)
-        colored = cm.viridis(heatmap)[:, :, :3].astype(np.float32) # (64, 64, 3)
-
-        # Blend with activation-scaled opacity (data-ink ratio)
-        dynamic_alpha = heatmap[..., np.newaxis] * alpha
-        blended = (1 - dynamic_alpha) * sketch + dynamic_alpha * colored
-        blended = np.clip(blended * 255, 0, 255).astype(np.uint8)
-
-        img = Image.fromarray(blended, mode='RGB').resize(
-            (size, size), Image.BILINEAR
-        )
-        buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        return 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
-
-
-    def compute_gradcam_multi(
-        self,
-        idx: int,
-        sc: Dict,
-    ) -> Dict[str, np.ndarray]:
-        """
-        Run ``compute_gradcam`` once per class in *sc* and return all
-        heatmaps in a single dict.
-
-        The contrastive score inside ``compute_gradcam`` means each map
-        answers "what made this image look like <class> rather than its
-        nearest competitor?" -- so the maps are directly comparable.
-
-        Returns
-        -------
-        heatmaps : dict  { class_name -> np.ndarray (64, 64) [0..1] }
-        """
-        import time
-        _, _, order = self.compute_prototypes(sc)
-        logger.debug(
-            "gradcam_multi idx=%d  computing %d heatmaps for classes: %s",
-            idx, len(order), order,
-        )
-        if not order:
-            return {}
-
-        t0 = time.perf_counter()
-
-        # Raw class heatmaps first; normalise globally across classes
-        raw_heatmaps = {
-            cname: self.compute_gradcam(
-                idx, sc, target_class=cname, normalize=False
-            )
-            for cname in order
-        }
-
-        global_max = max(hm.max() for hm in raw_heatmaps.values())
-        global_min = min(hm.min() for hm in raw_heatmaps.values())
-        heatmaps: Dict[str, np.ndarray] = {}
-        for cname, hm in raw_heatmaps.items():
-            if global_max - global_min > 1e-8:
-                heatmaps[cname] = (hm - global_min) / (global_max - global_min)
-            else:
-                heatmaps[cname] = np.zeros_like(hm)
-
-        logger.debug(
-            "gradcam_multi idx=%d  done in %.3fs",
-            idx, time.perf_counter() - t0,
-        )
-        return heatmaps
-
-    def gradcam_tiled_overlays(
-        self,
-        idx: int,
-        sc: Dict,
-        size: int = 128,
-        alpha: float = 0.55,
-    ) -> Dict[str, str]:
-        """
-        Return one base-64 PNG per class -- the Grad-CAM overlay rendered
-        with the contrastive heatmap for that class.  Ready to tile
-        directly in the dashboard.
-
-        Parameters
-        ----------
-        idx   : image index
-        sc    : support-set config
-        size  : output pixel size per tile (square)
-        alpha : heatmap blend opacity
-
-        Returns
-        -------
-        tiles : dict  { class_name -> 'data:image/png;base64,...' }
-        """
-        import matplotlib.cm as cm
-
-        key = self._tile_cache_key(idx, sc)
-        if key in self._gradcam_tile_cache:
-            logger.debug(
-                "gradcam_tiled_overlays idx=%d  cache HIT  "
-                "(cache size=%d)",
-                idx, len(self._gradcam_tile_cache),
-            )
-            return self._gradcam_tile_cache[key]
-
-        logger.debug(
-            "gradcam_tiled_overlays idx=%d  cache MISS  "
-            "(cache size=%d)  computing tiles...",
-            idx, len(self._gradcam_tile_cache),
-        )
-        heatmaps = self.compute_gradcam_multi(idx, sc)
-
-        sketch = self.images[idx].astype(np.float32) / 255.0
-        sketch_rgb = np.stack([sketch] * 3, axis=-1)           # (64, 64, 3)
-
-        tiles: Dict[str, str] = {}
-        for cname, heatmap in heatmaps.items():
-            colored = cm.viridis(heatmap)[:, :, :3].astype(np.float32)
-            dynamic_alpha = heatmap[..., np.newaxis] * alpha
-            blended = np.clip(
-                ((1 - dynamic_alpha) * sketch_rgb + dynamic_alpha * colored) * 255,
-                0,
-                255,
-            ).astype(np.uint8)
-            img = Image.fromarray(blended, mode='RGB').resize(
-                (size, size), Image.BILINEAR
-            )
-            buf = io.BytesIO()
-            img.save(buf, format='PNG')
-            tiles[cname] = (
-                'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
-            )
-
-        self._gradcam_tile_cache[key] = tiles
-        logger.debug(
-            "gradcam_tiled_overlays idx=%d  stored %d tiles  "
-            "(cache size now=%d)",
-            idx, len(tiles), len(self._gradcam_tile_cache),
-        )
-        return tiles
-
-    # ------------------------------------------------------------------
-    # Spatial attention masking  (Phase 3)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _mask_cache_key(idx: int, mask: List[List[int]]) -> str:
-        """Stable string key for the masked-embedding cache."""
-        return f"{idx}:{json.dumps(mask)}"
-
-    @staticmethod
-    def _tile_cache_key(idx: int, sc: Dict) -> str:
-        """Stable string key for the Grad-CAM tile cache.
-
-        Encodes the image index plus the support-set structure (class →
-        sorted list of (image-idx, weight, mask) tuples) so the cache
-        invalidates automatically whenever the support set changes.
-        """
-        sc_repr = {
-            cname: sorted(
-                (it["idx"], round(it.get("weight", 1.0), 3),
-                 json.dumps(it.get("mask")))
-                for it in items
-            )
-            for cname, items in sc.items()
-            if items
-        }
-        return f"{idx}:{json.dumps(sc_repr, sort_keys=True)}"
-
-    def compute_masked_embedding(
-        self,
-        idx: int,
-        mask: List[List[int]],
-    ) -> np.ndarray:
-        """
-        Run image *idx* through the encoder and apply a spatial mask to
-        the feature map before global-average pooling.
-
-        Parameters
-        ----------
-        idx  : image index
-        mask : 2-D list (H × W matching ``self._fmap_hw``),
-               values 0 (exclude) or 1 (keep).
-               An all-ones mask reproduces the original embedding.
-
-        Returns
-        -------
-        embedding : np.ndarray, shape (512,)
-        """
-        import torch
-
-        # ── cache lookup ──────────────────────────────────────────
-        key = self._mask_cache_key(idx, mask)
-        if key in self._masked_emb_cache:
-            return self._masked_emb_cache[key]
-
-        # ── forward pass — capture pre-GAP feature map ────────────
-        img_pil = Image.fromarray(self.images[idx].astype(np.uint8), mode='L')
-        x = self._transform(img_pil).unsqueeze(0)      # (1, 1, 64, 64)
-
-        fmaps = []
-
-        def _fwd_hook(_mod, _inp, out):
-            fmaps.append(out)
-
-        h = self._pre_gap_layer.register_forward_hook(_fwd_hook)
+    def load_session(self, path: str) -> Optional[Dict]:
+        """Return full saved session data or None if not found."""
         try:
-            with torch.no_grad():
-                self._encoder(x)
-        finally:
-            h.remove()
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            return None
 
-        feat = fmaps[0].detach().squeeze(0)             # (C, H, W)
+    @staticmethod
+    def available_classes(data_dir: Optional[str] = None) -> List[str]:
+        """Return all class names found in the QuickDraw test directory."""
+        d = Path(data_dir) if data_dir else _DATA_DIR
+        if not d.exists():
+            return list(CLASS_NAMES)
+        return sorted(p.name for p in d.iterdir() if p.is_dir())
 
-        # ── build mask tensor ─────────────────────────────────────
-        fh, fw = self._fmap_hw
-        mask_t = torch.tensor(mask, dtype=torch.float32) # (H', W')
-        if mask_t.shape != (fh, fw):
-            mask_t = torch.nn.functional.interpolate(
-                mask_t.unsqueeze(0).unsqueeze(0),
-                size=(fh, fw), mode='nearest',
-            ).squeeze()
+    @staticmethod
+    def available_custom_drawing_classes() -> List[dict]:
+        """Return info about classes in custom_drawings/ available for import.
 
-        # ── masked global-average pooling ─────────────────────────
-        masked = feat * mask_t.unsqueeze(0)              # (C, H, W)
-        mask_sum = mask_t.sum().item()
-        if mask_sum > 0:
-            emb = masked.sum(dim=(1, 2)) / mask_sum      # (C,)
-        else:
-            emb = torch.zeros(feat.shape[0])
-
-        result = emb.numpy().astype(np.float32)
-        self._masked_emb_cache[key] = result
+        Returns a list of dicts with keys: name, count, preview_paths.
+        """
+        if not _CUSTOM_DRAWINGS_DIR.exists():
+            return []
+        result = []
+        for p in sorted(_CUSTOM_DRAWINGS_DIR.iterdir()):
+            if not p.is_dir():
+                continue
+            imgs = sorted(p.glob('*.png'))
+            if not imgs:
+                continue
+            result.append({
+                "name": p.name,
+                "count": len(imgs),
+                "preview_paths": [str(f) for f in imgs[:5]],
+            })
         return result
 
-    def invalidate_mask_cache(self):
-        """Clear the masked-embedding cache and Grad-CAM tile cache
-        (call after model changes or support-set edits)."""
-        self._masked_emb_cache.clear()
-        self._gradcam_tile_cache.clear()
+    def add_class_from_custom_drawings(self, name: str, source_folder: Optional[str] = None) -> bool:
+        """Load images from custom_drawings/<source_folder>/ and add as class <name>.
+
+        *source_folder* defaults to *name* if not provided.
+        Returns True on success, False on failure.
+        """
+        if name in self.class_names:
+            logger.warning("Class %r already loaded", name)
+            return False
+        if len(self.class_names) >= len(CLASS_COLORS):
+            logger.warning("Class cap reached (%d)", len(CLASS_COLORS))
+            return False
+
+        folder = source_folder or name
+        cls_dir = _CUSTOM_DRAWINGS_DIR / folder
+        if not cls_dir.exists():
+            logger.warning("Custom drawings folder not found: %s", cls_dir)
+            return False
+
+        # Persistence: Copy images to data/quickdraw/test/{name} with drawn_ prefix
+        target_dir = _DATA_DIR / name
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        import torch
+        ci = len(self.class_names)  # new class index
+        new_images: List[np.ndarray] = []
+        new_labels: List[int] = []
+        new_image_paths: List[Path] = []
+
+        img_files = sorted(cls_dir.glob('*.png'))
+        for i, f in enumerate(img_files[:_MAX_PER_CLASS]):
+            target_path = target_dir / f"drawn_{i:04d}.png"
+            shutil.copy2(f, target_path)
+            
+            arr = np.array(Image.open(target_path).convert('L'))
+            new_images.append(arr)
+            new_labels.append(ci)
+            new_image_paths.append(target_path)
+
+        if not new_images:
+            logger.warning("No PNG images found in %s", cls_dir)
+            return False
+
+        # Embed with frozen encoder
+        all_embs: List[np.ndarray] = []
+        with torch.no_grad():
+            for i in range(0, len(new_images), 64):
+                batch = new_images[i:i + 64]
+                tensors = torch.stack([
+                    self._transform(
+                        Image.fromarray(img.astype(np.uint8), mode='L'))
+                    for img in batch
+                ])
+                all_embs.append(self._encoder(tensors).cpu().numpy())
+        new_hd = np.concatenate(all_embs, axis=0)
+
+        # Project into existing 2D UMAP space
+        new_2d = self._umap_reducer.transform(new_hd)
+
+        # Append to all arrays
+        self.images.extend(new_images)
+        self.labels = np.concatenate(
+            [self.labels, np.array(new_labels, dtype=int)])
+        self.embeddings_hd = np.vstack([self.embeddings_hd, new_hd])
+        self.embeddings_2d = np.vstack([self.embeddings_2d, new_2d])
+        self.image_paths.extend(new_image_paths)
+
+        # Rebuild KD-tree
+        from scipy.spatial import cKDTree
+        self._kd_tree = cKDTree(self.embeddings_2d)
+        self._b64_cache = {}
+        self._coact_cache = {}
+
+        self.class_names.append(name)
+        self.n_classes = len(self.class_names)
+        self.class_colors = list(CLASS_COLORS[:self.n_classes])
+
+        # Default support for new class (first K images)
+        idxs = np.where(self.labels == ci)[0][:_INITIAL_SUPPORT].tolist()
+        self.default_support[name] = [
+            {'idx': int(i), 'weight': 1.0} for i in idxs
+        ]
+        logger.info("Imported %d images from custom_drawings/%s as class %r",
+                    len(new_images), folder, name)
+        return True
 
     # ------------------------------------------------------------------
-    # Per-support-image diagnostics  (Phase 2)
+    # Dynamic class management
+    # ------------------------------------------------------------------
+
+    def add_class(self, name: str) -> bool:
+        """Load images + embeddings for *name* and append to all arrays.
+
+        Returns True on success, False if the data directory is missing
+        or the class limit is reached.
+        """
+        if name in self.class_names:
+            return True
+        if len(self.class_names) >= len(CLASS_COLORS):
+            logger.warning("Class cap reached (%d)", len(CLASS_COLORS))
+            return False
+
+        cls_dir = _DATA_DIR / name
+        if not cls_dir.exists():
+            logger.warning("Class directory not found: %s", cls_dir)
+            return False
+
+        import torch
+        new_images: List[np.ndarray] = []
+        new_labels: List[int] = []
+        ci = len(self.class_names)   # new class index
+
+        excluded = set()
+        if _EXCLUDED_PATH.exists():
+            try:
+                with open(_EXCLUDED_PATH) as f:
+                    excluded = set(json.load(f))
+            except Exception:
+                pass
+
+        img_files = sorted(cls_dir.glob('*.png'))
+        valid_count = 0
+        new_image_paths = []
+        for f in img_files:
+            rel_path = str(f.relative_to(_DATA_DIR))
+            arr = np.array(Image.open(f).convert('L'))
+            new_images.append(arr)
+            new_labels.append(ci)
+            new_image_paths.append(f)
+            
+            if rel_path in excluded:
+                pass
+            else:
+                valid_count += 1
+            if valid_count >= _MAX_PER_CLASS:
+                break
+
+        if not new_images:
+            return False
+
+        # Embed with frozen encoder
+        all_embs: List[np.ndarray] = []
+        with torch.no_grad():
+            for i in range(0, len(new_images), 64):
+                batch = new_images[i:i + 64]
+                tensors = torch.stack([
+                    self._transform(
+                        Image.fromarray(img.astype(np.uint8), mode='L'))
+                    for img in batch
+                ])
+                all_embs.append(self._encoder(tensors).cpu().numpy())
+        new_hd = np.concatenate(all_embs, axis=0)
+
+        # Project into existing 2D space using the fitted UMAP reducer
+        new_2d = self._umap_reducer.transform(new_hd)
+
+        # Append to all arrays
+        start_idx = len(self.images)
+        self.images.extend(new_images)
+        self.labels = np.concatenate(
+            [self.labels, np.array(new_labels, dtype=int)])
+        self.embeddings_hd = np.vstack([self.embeddings_hd, new_hd])
+        self.embeddings_2d = np.vstack([self.embeddings_2d, new_2d])
+
+        for i, f in enumerate(new_image_paths):
+            rel_path = str(f.relative_to(_DATA_DIR))
+            if rel_path in excluded:
+                self.excluded_indices.add(start_idx + i)
+        self.image_paths.extend(new_image_paths)
+
+        # Rebuild KD-tree
+        from scipy.spatial import cKDTree
+        self._kd_tree = cKDTree(self.embeddings_2d)
+        self._b64_cache = {}
+        self._coact_cache = {}
+
+        self.class_names.append(name)
+        self.n_classes = len(self.class_names)
+        self.class_colors = list(CLASS_COLORS[:self.n_classes])
+
+        # Default support for new class
+        idxs = np.where(self.labels == ci)[0][:_INITIAL_SUPPORT].tolist()
+        self.default_support[name] = [
+            {'idx': int(i), 'weight': 1.0} for i in idxs
+        ]
+        return True
+
+    def remove_classes(self, names: List[str]) -> Dict[int, int]:
+        """Remove all images/embeddings for multiple classes.
+        
+        Returns a dictionary mapping old image indices to new image indices.
+        """
+        if not names:
+            return {}
+            
+        valid_names = [n for n in names if n in self.class_names]
+        if not valid_names:
+            return {}
+        if len(self.class_names) - len(valid_names) < 1:
+            logger.warning("Cannot remove all classes")
+            return {}
+            
+        remove_cis = [self.class_names.index(n) for n in valid_names]
+        
+        # Slicing mask
+        keep = np.ones(len(self.labels), dtype=bool)
+        for ci in remove_cis:
+            keep[self.labels == ci] = False
+            
+        # Map old indices to new
+        old_to_new = {}
+        new_exc = set()
+        new_idx = 0
+        for i, k in enumerate(keep):
+            if k:
+                old_to_new[i] = new_idx
+                if i in self.excluded_indices:
+                    new_exc.add(new_idx)
+                new_idx += 1
+                
+        self.excluded_indices = new_exc
+        
+        # Slice arrays
+        keep_idxs = [i for i, k in enumerate(keep) if k]
+        self.image_paths = [self.image_paths[i] for i in keep_idxs]
+        self.images = [self.images[i] for i in keep_idxs]
+        
+        # Re-index labels
+        new_labels = self.labels[keep].copy()
+        for ci in sorted(remove_cis, reverse=True):
+            new_labels[new_labels > ci] -= 1
+        self.labels = new_labels
+        
+        self.embeddings_hd = self.embeddings_hd[keep]
+        self.embeddings_2d = self.embeddings_2d[keep]
+        
+        # Rebuild KD-tree
+        from scipy.spatial import cKDTree
+        self._kd_tree = cKDTree(self.embeddings_2d)
+        self._b64_cache = {}
+        self._coact_cache = {}
+        
+        # Update class lists
+        for n in valid_names:
+            self.class_names.remove(n)
+            self.default_support.pop(n, None)
+            
+        self.n_classes = len(self.class_names)
+        self.class_colors = list(CLASS_COLORS[:self.n_classes])
+        
+        return old_to_new
+
+    def sync_to_classes(self, target: List[str]) -> tuple:
+        """Bring the engine's class set in line with *target*.
+
+        Removes classes that are currently loaded but absent from *target*,
+        then adds classes that are in *target* but not yet loaded.
+
+        Returns (idx_map, readded) where:
+        - idx_map: old-to-new index map from any remove_classes call
+        - readded: set of class names that were re-added via add_class.
+          Their images are at brand-new indices (appended at the end), so
+          any sc indices from an old snapshot are invalid for them — callers
+          must fall back to engine.default_support for these classes.
+        """
+        current = set(self.class_names)
+        wanted  = list(target)
+
+        to_remove = [c for c in current if c not in set(wanted)]
+        to_add    = [c for c in wanted  if c not in current]
+
+        idx_map: Dict[int, int] = {}
+        if to_remove:
+            idx_map = self.remove_classes(to_remove)
+
+        readded: set = set()
+        for name in to_add:
+            if self.add_class(name):
+                readded.add(name)
+
+        return idx_map, readded
+
+
     # ------------------------------------------------------------------
 
     def support_diagnostics(
@@ -727,132 +642,129 @@ class AnalyticsEngine:
 
         return results
 
-    # ------------------------------------------------------------------
-    # Support set suggestions  (Phase 4)
-    # ------------------------------------------------------------------
-
-    def suggest_support_changes(
-        self,
-        cname: str,
-        sc: Dict,
-        temperature: float = 1.0,
-        max_candidates: int = 5,
-    ) -> Dict[str, list]:
+    def class_images_pool(self, cname: str, sc: Dict) -> List[Dict]:
         """
-        Suggest swaps and additions for class *cname*'s support set.
-
-        Scans all non-support images of the same class, simulates each
-        change, and ranks by overall-accuracy delta.
-
-        Returns
-        -------
-        {
-            "swaps":  [ { "remove_idx", "add_idx", "acc_delta",
-                          "new_acc", "cos_sim" }, … ],
-            "adds":   [ { "add_idx", "acc_delta",
-                          "new_acc", "cos_sim" }, … ],
-        }
-
-        Lists are sorted best-first (highest acc_delta), capped at
-        *max_candidates* each.
+        Returns ALL images of cname with:
+        {idx, cos_sim, comp_dist, is_support}
         """
-        items = sc.get(cname, [])
-        if not items:
-            return {"swaps": [], "adds": []}
-
-        base_res = self.classify(sc, temperature)
-        base_acc = base_res["overall"]
-
-        # Current prototype for cos-sim computation
         _, phd, order = self.compute_prototypes(sc)
-        ci = order.index(cname) if cname in order else -1
+        if cname not in order:
+            return []
 
-        support_idxs = {it["idx"] for it in items}
-        # Non-support images of the same class
-        class_mask = self.labels == self.class_names.index(cname)
-        candidates = [
-            int(i) for i in np.where(class_mask)[0]
-            if i not in support_idxs
-        ]
+        ci = order.index(cname)
+        own_proto = phd[ci]
 
-        if not candidates:
-            return {"swaps": [], "adds": []}
+        other_idxs = [i for i in range(len(order)) if i != ci]
+        other_protos = phd[other_idxs] if other_idxs else np.array([])
 
-        # Pre-compute cosine similarity of each candidate to prototype
-        def _cos(idx):
-            if ci < 0:
-                return 0.0
+        all_idxs = np.where(self.labels == self.class_names.index(cname))[0]
+        sc_idxs = self.support_indices(sc)
+
+        results = []
+        for idx in all_idxs:
             emb = self.embeddings_hd[idx]
-            proto = phd[ci]
-            ne, np_ = np.linalg.norm(emb), np.linalg.norm(proto)
-            return float(np.dot(emb, proto) / (ne * np_ + 1e-9))
 
-        # ── swap suggestions ──────────────────────────────────────
-        # Only try swapping support images that have positive LOO delta
-        # (removing them helps or is neutral) — no point swapping the
-        # best support images.  But if all are positive, try all.
-        diags = self.support_diagnostics(cname, sc, temperature)
-        # Sort worst-first (highest LOO delta = most harmful)
-        worst = sorted(diags, key=lambda d: d["loo_delta"], reverse=True)
-        # Try swapping the worst support images (up to 3 to bound cost)
-        swap_targets = worst[:min(3, len(worst))]
+            norm_e = np.linalg.norm(emb)
+            norm_p = np.linalg.norm(own_proto)
+            if norm_e > 1e-9 and norm_p > 1e-9:
+                cos = float(np.dot(emb, own_proto) / (norm_e * norm_p))
+            else:
+                cos = 0.0
 
-        swap_results = []
-        for diag in swap_targets:
-            rm_idx = diag["idx"]
-            # Build sc without this image
-            stripped = [it for it in items if it["idx"] != rm_idx]
-            for cand_idx in candidates:
-                trial_sc = {c: list(v) for c, v in sc.items()}
-                trial_sc[cname] = stripped + [
-                    {"idx": cand_idx, "weight": 1.0}
-                ]
-                trial_res = self.classify(trial_sc, temperature)
-                delta = trial_res["overall"] - base_acc
-                swap_results.append({
-                    "remove_idx": rm_idx,
-                    "add_idx": cand_idx,
-                    "acc_delta": float(delta),
-                    "new_acc": float(trial_res["overall"]),
-                    "cos_sim": _cos(cand_idx),
-                })
+            if len(other_protos) > 0:
+                dists_to_others = np.linalg.norm(other_protos - emb[None, :], axis=1)
+                comp_dist = float(np.min(dists_to_others))
+            else:
+                comp_dist = float("inf")
 
-        swap_results.sort(key=lambda r: r["acc_delta"], reverse=True)
-
-        # ── add suggestions ───────────────────────────────────────
-        add_results = []
-        for cand_idx in candidates:
-            trial_sc = {c: list(v) for c, v in sc.items()}
-            trial_sc[cname] = list(items) + [
-                {"idx": cand_idx, "weight": 1.0}
-            ]
-            trial_res = self.classify(trial_sc, temperature)
-            delta = trial_res["overall"] - base_acc
-            add_results.append({
-                "add_idx": cand_idx,
-                "acc_delta": float(delta),
-                "new_acc": float(trial_res["overall"]),
-                "cos_sim": _cos(cand_idx),
+            results.append({
+                "idx": int(idx),
+                "cos_sim": cos,
+                "competitor_dist": comp_dist,
+                "is_support": int(idx) in sc_idxs
             })
 
-        add_results.sort(key=lambda r: r["acc_delta"], reverse=True)
+        return results
 
-        return {
-            "swaps": swap_results[:max_candidates],
-            "adds": add_results[:max_candidates],
-        }
+    def candidate_add_delta(self, cname: str, cand_idx: int, sc: Dict, temp: float = 1.0) -> float:
+        """
+        Runs one trial classify with cand_idx added, returns accuracy delta
+        """
+        base_res = self.classify(sc, temp)
+        base_acc = base_res["overall"]
+
+        trial_sc = {c: list(v) for c, v in sc.items()}
+        trial_sc[cname] = trial_sc.get(cname, []) + [{"idx": cand_idx, "weight": 1.0}]
+
+        trial_res = self.classify(trial_sc, temp)
+        return float(trial_res["overall"] - base_acc)
 
     # ------------------------------------------------------------------
     # Image helpers
+    def encode_image(self, pil_image):
+        """
+        Runs _transform → _encoder → _umap_reducer.transform()
+        Returns (hd_embedding, position_2d)
+        """
+        import torch
+        img_t = self._transform(pil_image)
+        if len(img_t.shape) == 3:
+            img_t = img_t.unsqueeze(0)
+            
+        self._encoder.eval()
+        with torch.no_grad():
+            emb_hd = self._encoder(img_t)
+            emb_hd = emb_hd.cpu().numpy()[0]
+            
+        pos_2d = self._umap_reducer.transform(emb_hd.reshape(1, -1))[0]
+        return emb_hd, pos_2d
+
+    def add_custom_image(self, cname: str, img_arr: np.ndarray, hd_emb: np.ndarray, pos_2d: np.ndarray) -> int:
+        """
+        Appends single drawn image to global matrices.
+        Returns the new global index, or -1 on error.
+        """
+        if cname not in self.class_names:
+            return -1
+        ci = self.class_names.index(cname)
+        
+        from pathlib import Path
+        import time
+
+        idx = len(self.images)
+        self.images.append(img_arr)
+        self.labels = np.concatenate([self.labels, np.array([ci], dtype=int)])
+        self.embeddings_hd = np.vstack([self.embeddings_hd, hd_emb.reshape(1, -1)])
+        self.embeddings_2d = np.vstack([self.embeddings_2d, pos_2d.reshape(1, -1)])
+        
+        if hasattr(self, 'image_paths'):
+            self.image_paths.append(Path(f"drawings/{cname}/{int(time.time())}.png"))
+            
+        from scipy.spatial import cKDTree
+        self._kd_tree = cKDTree(self.embeddings_2d)
+        # New image added — invalidate thumbnail cache for this index
+        # (coact cache is unaffected since new idx has no prior entry)
+        self._b64_cache.pop((idx, 56), None)
+        self._b64_cache.pop((idx, 80), None)
+        self._b64_cache.pop((idx, 32), None)
+        
+        return idx
+
     # ------------------------------------------------------------------
 
     def image_to_base64(self, idx: int, size: int = 56) -> str:
+        key = (idx, size)
+        cached = self._b64_cache.get(key)
+        if cached is not None:
+            return cached
         arr = self.images[idx]
         img = Image.fromarray(arr.astype(np.uint8), mode='L')
         img = img.resize((size, size), Image.NEAREST)
         buf = io.BytesIO()
         img.save(buf, format='PNG')
-        return 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
+        result = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
+        self._b64_cache[key] = result
+        return result
 
     def support_indices(self, sc: Dict) -> set:
         out: set = set()
@@ -863,7 +775,8 @@ class AnalyticsEngine:
 
     def query_mask(self, sc: Dict) -> np.ndarray:
         si = self.support_indices(sc)
-        return np.array([i not in si for i in range(len(self.labels))])
+        exc = getattr(self, 'excluded_indices', set())
+        return np.array([i not in si and i not in exc for i in range(len(self.labels))])
 
     # ------------------------------------------------------------------
     # Prototype computation (HD for accuracy, 2D for scatter)
@@ -872,35 +785,31 @@ class AnalyticsEngine:
     def compute_prototypes(
         self, sc: Dict
     ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
-        """Return (protos_2d, protos_hd, class_order).
-
-        If any support item has a ``"mask"`` key, its HD embedding is
-        replaced by the masked version (computed via
-        ``compute_masked_embedding``).  The 2-D embedding is left
-        unchanged — UMAP positions stay fixed; only the HD prototype
-        (which drives accuracy) is affected.
-        """
+        """Return (protos_2d, protos_hd, class_order)."""
         order, p2d, phd = [], [], []
         for cname in self.class_names:
             items = sc.get(cname, [])
             if not items:
                 continue
-            idxs = [it['idx'] for it in items]
             wts = np.array([it['weight'] for it in items])
+            if wts.sum() < 1e-9:
+                continue
             wts = wts / wts.sum()
             order.append(cname)
-            p2d.append(np.average(self.embeddings_2d[idxs], axis=0, weights=wts))
-
-            # HD embeddings — use masked version when a mask is present
-            hd_vecs = []
+            
+            vecs_2d, vecs_hd = [], []
             for it in items:
-                mask = it.get('mask')
-                if mask is not None:
-                    hd_vecs.append(self.compute_masked_embedding(it['idx'], mask))
+                idx = it['idx']
+                if isinstance(idx, int):
+                    vecs_2d.append(self.embeddings_2d[idx])
+                    vecs_hd.append(self.embeddings_hd[idx])
                 else:
-                    hd_vecs.append(self.embeddings_hd[it['idx']])
-            hd_vecs = np.array(hd_vecs)
-            phd.append(np.average(hd_vecs, axis=0, weights=wts))
+                    if 'emb_hd' in it and 'pos2d' in it:
+                        vecs_2d.append(np.array(it['pos2d']))
+                        vecs_hd.append(np.array(it['emb_hd']))
+            
+            p2d.append(np.average(vecs_2d, axis=0, weights=wts))
+            phd.append(np.average(vecs_hd, axis=0, weights=wts))
 
         return np.array(p2d), np.array(phd), order
 
@@ -951,10 +860,10 @@ class AnalyticsEngine:
         )
 
         nc = len(order)
-        cm = np.zeros((nc, nc), dtype=int)
-        for t, p in zip(true_idx, preds):
+        cm = np.zeros((nc, nc), dtype=float)
+        for t, prob_vec in zip(true_idx, probs):
             if t >= 0:
-                cm[t, p] += 1
+                cm[t] += prob_vec
 
         accs = {}
         for i, cn in enumerate(order):
@@ -1024,6 +933,88 @@ class AnalyticsEngine:
         ]
         return new_sc
 
+    def exclude_image(self, idx: int) -> Optional[int]:
+        """Exclude an image by index and load a replacement if possible.
+        
+        Saves relative path to excluded_images.json.
+        Returns the index of the newly added replacement image, or None.
+        """
+        if idx >= len(self.image_paths):
+            return None
+            
+        path = self.image_paths[idx]
+        try:
+            rel_path = str(path.relative_to(_DATA_DIR))
+        except ValueError:
+            return None
+            
+        # Save to file
+        excluded = set()
+        if _EXCLUDED_PATH.exists():
+            try:
+                with open(_EXCLUDED_PATH) as f:
+                    excluded = set(json.load(f))
+            except Exception:
+                pass
+        
+        excluded.add(rel_path)
+        try:
+            with open(_EXCLUDED_PATH, 'w') as f:
+                json.dump(list(excluded), f)
+        except Exception as e:
+            logger.warning("Failed to save excluded_images.json: %s", e)
+            return None
+            
+        self.excluded_indices.add(idx)
+        
+        # Load replacement
+        cname = self.class_names[self.labels[idx]]
+        cls_dir = _DATA_DIR / cname
+        if not cls_dir.exists():
+            return None
+            
+        img_files = sorted(cls_dir.glob('*.png'))
+        loaded_paths = {str(p) for p in self.image_paths}
+        
+        replacement_file = None
+        for f in img_files:
+            rel = str(f.relative_to(_DATA_DIR))
+            if str(f) not in loaded_paths and rel not in excluded:
+                replacement_file = f
+                break
+                
+        if replacement_file:
+            logger.info("Loading replacement for index %d: %s", idx, replacement_file)
+            arr = np.array(Image.open(replacement_file).convert('L'))
+            
+            import torch
+            with torch.no_grad():
+                tensor = self._transform(Image.fromarray(arr.astype(np.uint8), mode='L')).unsqueeze(0)
+                new_hd = self._encoder(tensor).cpu().numpy()
+            
+            new_2d = self._umap_reducer.transform(new_hd)
+            
+            # Append to memory arrays
+            self.images.append(arr)
+            self.labels = np.concatenate([self.labels, np.array([self.labels[idx]], dtype=int)])
+            self.embeddings_hd = np.vstack([self.embeddings_hd, new_hd])
+            self.embeddings_2d = np.vstack([self.embeddings_2d, new_2d])
+            self.image_paths.append(replacement_file)
+            
+            from scipy.spatial import cKDTree
+            self._kd_tree = cKDTree(self.embeddings_2d)
+            # Replaced image — evict the old index from thumbnail cache
+            for _size in (32, 56, 80):
+                self._b64_cache.pop((idx, _size), None)
+            self._coact_cache = {
+                k: v for k, v in self._coact_cache.items()
+                if k[0] != idx and k[1] != idx
+            }
+            
+            return len(self.images) - 1
+            
+        return None
+
     def _empty_result(self):
         return {
             'preds': np.array([]),
@@ -1038,6 +1029,79 @@ class AnalyticsEngine:
             'p2d': np.array([]),
             'phd': np.array([]),
         }
+
+    def get_co_activation_images(self, q_idx: int, s_idx: int, size: int = 120) -> Tuple[str, str]:
+        """Compute spatial Dense Co-Activation Correspondence between query and support image.
+        Intercepts internal Conv4 layers to return glowing visual analytic heatmaps.
+        """
+        key = (q_idx, s_idx, size)
+        cached = self._coact_cache.get(key)
+        if cached is not None:
+            return cached
+        import torch
+        import torch.nn.functional as F
+        import matplotlib.pyplot as plt
+        
+        # 1. Fetch raw PyTorch grids
+        img_q = self.images[q_idx]
+        img_s = self.images[s_idx]
+        
+        t_q = self._transform(Image.fromarray(img_q.astype(np.uint8), mode='L')).unsqueeze(0)
+        t_s = self._transform(Image.fromarray(img_s.astype(np.uint8), mode='L')).unsqueeze(0)
+        
+        with torch.no_grad():
+            # 2. Extract deep 4x4 Spatial Features cleanly
+            feat_q = self._encoder.encoder(t_q)  
+            feat_s = self._encoder.encoder(t_s)
+        
+        B, C, H, W = feat_q.shape  # 1, 512, 4, 4
+        
+        # 3. Compute pairwise Cosine Similarity Matrix globally
+        vec_q = feat_q.view(C, -1).t()
+        vec_s = feat_s.view(C, -1).t()
+        
+        vec_q_norm = F.normalize(vec_q, p=2, dim=1)
+        vec_s_norm = F.normalize(vec_s, p=2, dim=1)
+        
+        sim_matrix = torch.mm(vec_q_norm, vec_s_norm.t())
+        sim_matrix = F.relu(sim_matrix)
+        
+        # 4. Filter spatial strongest-match intensities
+        q_scores, _ = sim_matrix.max(dim=1)
+        s_scores, _ = sim_matrix.max(dim=0)
+        
+        q_grid = q_scores.view(1, 1, H, W)
+        s_grid = s_scores.view(1, 1, H, W)
+        
+        # 5. Bicubic Upsample cleanly to 64x64 HD layout
+        q_hm = F.interpolate(q_grid, size=(64, 64), mode='bicubic', align_corners=False).squeeze().numpy()
+        s_hm = F.interpolate(s_grid, size=(64, 64), mode='bicubic', align_corners=False).squeeze().numpy()
+        
+        q_hm = np.clip((q_hm - q_hm.min()) / (q_hm.max() - q_hm.min() + 1e-9), 0, 1)
+        s_hm = np.clip((s_hm - s_hm.min()) / (s_hm.max() - s_hm.min() + 1e-9), 0, 1)
+        
+        cmap = plt.colormaps.get_cmap('magma')
+        
+        def apply_heatmap(img_arr, hm_arr):
+            colored_hm = cmap(hm_arr)[:, :, :3] * 255
+            base_img = np.stack((img_arr,) * 3, axis=-1).astype(float)
+            base_img = base_img * 0.4  # Dim background structural grid
+            
+            # Blend maps heavily enforcing the visual focus glow geometry
+            alpha = hm_arr[:, :, np.newaxis] ** 1.8 
+            blended = (base_img * (1 - alpha)) + (colored_hm * alpha)
+            
+            final_img = Image.fromarray(blended.astype(np.uint8))
+            if size != 64:
+                final_img = final_img.resize((size, size), Image.NEAREST)
+                
+            buf = io.BytesIO()
+            final_img.save(buf, format="PNG")
+            return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
+            
+        result = apply_heatmap(img_q, q_hm), apply_heatmap(img_s, s_hm)
+        self._coact_cache[key] = result
+        return result
 
     def query_distances(self, qidx: int, sc: Dict, temperature: float = 1.0) -> Dict:
         """Distance breakdown for a single query (HD-based)."""
@@ -1062,16 +1126,23 @@ class AnalyticsEngine:
         }
 
     # ------------------------------------------------------------------
-    # Decision boundary mesh (2-D approximation for scatter overlay)
+    # Decision boundary mesh (2-D Voronoi approximation)
     # ------------------------------------------------------------------
 
     def decision_mesh(
         self, sc: Dict, temperature: float,
-        proto_overrides: Optional[Dict] = None, res: int = 80,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        proto_overrides: Optional[Dict] = None, res: int = 60,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return (xx, ys, zz_class, zz_dummy) — 2D Voronoi over prototype
+        positions.  zz_dummy is a zeros array kept for call-site compatibility.
+        The mesh is a spatial approximation only; actual classification uses
+        HD embeddings.  Explanation of individual decisions lives in the
+        inspector, not the mesh.
+        """
         p2d, _, order = self.compute_prototypes(sc)
         if not order:
-            return np.array([]), np.array([]), np.array([])
+            e = np.array([])
+            return e, e, e, e
         if proto_overrides:
             for cn, pos in proto_overrides.items():
                 if cn in order:
@@ -1088,5 +1159,13 @@ class AnalyticsEngine:
         grid = np.c_[xx.ravel(), yy.ravel()]
         d = cdist(grid, p2d)
         temp = max(temperature, 0.01)
-        zz = np.argmin(d / temp, axis=1).reshape(xx.shape)
-        return xx, ys, zz
+        
+        logits = -d / temp
+        logits -= logits.max(axis=1, keepdims=True)
+        probs = np.exp(logits)
+        probs /= probs.sum(axis=1, keepdims=True)
+        
+        zz_class = np.argmax(probs, axis=1).reshape(xx.shape)
+        zz_alpha = probs.max(axis=1).reshape(xx.shape)
+        
+        return xx, ys, zz_class, zz_alpha
