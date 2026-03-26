@@ -1,6 +1,7 @@
 import numpy as np
 from PIL import Image
 import io
+import shutil
 import json
 import base64
 from pathlib import Path
@@ -39,6 +40,7 @@ CLASS_COLORS = [
 _ROOT = Path(__file__).resolve().parent.parent
 _CHECKPOINT = _ROOT / 'checkpoints' / 'best_model.pt'
 _DATA_DIR = _ROOT / 'data' / 'quickdraw' / 'test'
+_CUSTOM_DRAWINGS_DIR = _ROOT / 'custom_drawings'
 _EXCLUDED_PATH = _ROOT / 'excluded_images.json'
 _MAX_PER_CLASS = 40   # images to load per class (out of ~75 available)
 _INITIAL_SUPPORT = 5
@@ -81,7 +83,7 @@ class AnalyticsEngine:
         If *active_classes* is provided it overrides CLASS_NAMES.
         """
         if active_classes:
-            self.class_names = list(active_classes)
+            self.class_names = [c for c in active_classes if (_DATA_DIR / c).exists()]
             self.n_classes = len(self.class_names)
             self.class_colors = list(CLASS_COLORS[:self.n_classes])
         import torch
@@ -242,6 +244,114 @@ class AnalyticsEngine:
         if not d.exists():
             return list(CLASS_NAMES)
         return sorted(p.name for p in d.iterdir() if p.is_dir())
+
+    @staticmethod
+    def available_custom_drawing_classes() -> List[dict]:
+        """Return info about classes in custom_drawings/ available for import.
+
+        Returns a list of dicts with keys: name, count, preview_paths.
+        """
+        if not _CUSTOM_DRAWINGS_DIR.exists():
+            return []
+        result = []
+        for p in sorted(_CUSTOM_DRAWINGS_DIR.iterdir()):
+            if not p.is_dir():
+                continue
+            imgs = sorted(p.glob('*.png'))
+            if not imgs:
+                continue
+            result.append({
+                "name": p.name,
+                "count": len(imgs),
+                "preview_paths": [str(f) for f in imgs[:5]],
+            })
+        return result
+
+    def add_class_from_custom_drawings(self, name: str, source_folder: Optional[str] = None) -> bool:
+        """Load images from custom_drawings/<source_folder>/ and add as class <name>.
+
+        *source_folder* defaults to *name* if not provided.
+        Returns True on success, False on failure.
+        """
+        if name in self.class_names:
+            logger.warning("Class %r already loaded", name)
+            return False
+        if len(self.class_names) >= len(CLASS_COLORS):
+            logger.warning("Class cap reached (%d)", len(CLASS_COLORS))
+            return False
+
+        folder = source_folder or name
+        cls_dir = _CUSTOM_DRAWINGS_DIR / folder
+        if not cls_dir.exists():
+            logger.warning("Custom drawings folder not found: %s", cls_dir)
+            return False
+
+        # Persistence: Copy images to data/quickdraw/test/{name} with drawn_ prefix
+        target_dir = _DATA_DIR / name
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        import torch
+        ci = len(self.class_names)  # new class index
+        new_images: List[np.ndarray] = []
+        new_labels: List[int] = []
+        new_image_paths: List[Path] = []
+
+        img_files = sorted(cls_dir.glob('*.png'))
+        for i, f in enumerate(img_files[:_MAX_PER_CLASS]):
+            target_path = target_dir / f"drawn_{i:04d}.png"
+            shutil.copy2(f, target_path)
+            
+            arr = np.array(Image.open(target_path).convert('L'))
+            new_images.append(arr)
+            new_labels.append(ci)
+            new_image_paths.append(target_path)
+
+        if not new_images:
+            logger.warning("No PNG images found in %s", cls_dir)
+            return False
+
+        # Embed with frozen encoder
+        all_embs: List[np.ndarray] = []
+        with torch.no_grad():
+            for i in range(0, len(new_images), 64):
+                batch = new_images[i:i + 64]
+                tensors = torch.stack([
+                    self._transform(
+                        Image.fromarray(img.astype(np.uint8), mode='L'))
+                    for img in batch
+                ])
+                all_embs.append(self._encoder(tensors).cpu().numpy())
+        new_hd = np.concatenate(all_embs, axis=0)
+
+        # Project into existing 2D UMAP space
+        new_2d = self._umap_reducer.transform(new_hd)
+
+        # Append to all arrays
+        self.images.extend(new_images)
+        self.labels = np.concatenate(
+            [self.labels, np.array(new_labels, dtype=int)])
+        self.embeddings_hd = np.vstack([self.embeddings_hd, new_hd])
+        self.embeddings_2d = np.vstack([self.embeddings_2d, new_2d])
+        self.image_paths.extend(new_image_paths)
+
+        # Rebuild KD-tree
+        from scipy.spatial import cKDTree
+        self._kd_tree = cKDTree(self.embeddings_2d)
+        self._b64_cache = {}
+        self._coact_cache = {}
+
+        self.class_names.append(name)
+        self.n_classes = len(self.class_names)
+        self.class_colors = list(CLASS_COLORS[:self.n_classes])
+
+        # Default support for new class (first K images)
+        idxs = np.where(self.labels == ci)[0][:_INITIAL_SUPPORT].tolist()
+        self.default_support[name] = [
+            {'idx': int(i), 'weight': 1.0} for i in idxs
+        ]
+        logger.info("Imported %d images from custom_drawings/%s as class %r",
+                    len(new_images), folder, name)
+        return True
 
     # ------------------------------------------------------------------
     # Dynamic class management
@@ -408,6 +518,36 @@ class AnalyticsEngine:
         self.class_colors = list(CLASS_COLORS[:self.n_classes])
         
         return old_to_new
+
+    def sync_to_classes(self, target: List[str]) -> tuple:
+        """Bring the engine's class set in line with *target*.
+
+        Removes classes that are currently loaded but absent from *target*,
+        then adds classes that are in *target* but not yet loaded.
+
+        Returns (idx_map, readded) where:
+        - idx_map: old-to-new index map from any remove_classes call
+        - readded: set of class names that were re-added via add_class.
+          Their images are at brand-new indices (appended at the end), so
+          any sc indices from an old snapshot are invalid for them — callers
+          must fall back to engine.default_support for these classes.
+        """
+        current = set(self.class_names)
+        wanted  = list(target)
+
+        to_remove = [c for c in current if c not in set(wanted)]
+        to_add    = [c for c in wanted  if c not in current]
+
+        idx_map: Dict[int, int] = {}
+        if to_remove:
+            idx_map = self.remove_classes(to_remove)
+
+        readded: set = set()
+        for name in to_add:
+            if self.add_class(name):
+                readded.add(name)
+
+        return idx_map, readded
 
 
     # ------------------------------------------------------------------

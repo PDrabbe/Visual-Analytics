@@ -4,9 +4,14 @@ Run:  python -m dashboard.app
 """
 
 import hashlib
+import base64
+import shutil
+import time
 import json
 import re
 from pathlib import Path
+from typing import Dict, List, Optional
+from datetime import datetime
 import numpy as np
 import plotly.graph_objects as go
 from dash import (
@@ -63,11 +68,29 @@ if not is_main_file or is_worker:
         print(f"Session restored ({len(valid_session)} classes)")
 else:
     if _saved_classes:
-        _engine_tmp.class_names = list(_saved_classes)
+        _DATA_DIR = Path(__file__).resolve().parent.parent / 'data' / 'quickdraw' / 'test'
+        _engine_tmp.class_names = [c for c in _saved_classes if (_DATA_DIR / c).exists()]
     engine = _engine_tmp
 
 # Discover all available classes
 ALL_CLASSES = AnalyticsEngine.available_classes()
+
+# Discover classes importable from custom_drawings/
+ALL_CUSTOM_DRAWING_CLASSES = AnalyticsEngine.available_custom_drawing_classes()
+
+
+def _get_custom_classes_from_disk() -> list:
+    """Scan data directory for subfolders containing drawn_*.png."""
+    from pathlib import Path
+    data_dir = Path(__file__).resolve().parent.parent / 'data' / 'quickdraw' / 'test'
+    if not data_dir.exists():
+        return []
+    custom = []
+    for p in data_dir.iterdir():
+        if p.is_dir() and any(p.glob("drawn_*.png")):
+            custom.append(p.name)
+    return sorted(custom)
+
 
 
 # =====================================================================
@@ -248,8 +271,6 @@ app.layout = html.Div(
                                 ),
                                 html.Div(id="class-legend",
                                          className="class-legend"),
-                                html.Div(id="changelog-display",
-                                         className="changelog-display"),
                             ],
                             className="sidebar-section",
                         ),
@@ -357,6 +378,10 @@ app.layout = html.Div(
         # filtered relay store — clientside callback writes here only when
         # annotation keys are present, eliminating zoom/pan server round-trips
         dcc.Store(id="annotation-relayout-store", data=None),
+        # tracks which class names were created by the user (vs pre-trained)
+        dcc.Store(id="custom-classes-store", data=_get_custom_classes_from_disk()),
+        # tracks selected folder in the import-from-drawings panel
+        dcc.Store(id="import-selected-folder-store", data=None),
     ],
     className="root",
 )
@@ -915,89 +940,182 @@ def clear_selection(n):
     return None, None
 
 
+def _restore_snapshot(snapshot: dict, current_sel_class: str) -> tuple:
+    """Restore a saved state snapshot, syncing the engine and fixing sc indices.
+
+    The key subtlety: when a class is re-added via engine.add_class() its
+    images are appended at the end with brand-new indices that have nothing
+    to do with the indices in the snapshot's sc dict (those came from a
+    previous add_class call that placed images at different positions).
+    We therefore fall back to engine.default_support for any re-added class.
+
+    Returns (restored_sc, restored_classes, options, new_sel).
+    """
+    target_engine_classes = (
+        snapshot.get("engine_classes") or snapshot.get("classes") or []
+    )
+
+    idx_map: dict = {}
+    readded: set = set()
+    if target_engine_classes and set(target_engine_classes) != set(engine.class_names):
+        idx_map, readded = engine.sync_to_classes(target_engine_classes)
+
+    if "excluded" in snapshot:
+        engine.excluded_indices = set(snapshot["excluded"])
+
+    raw_sc = snapshot.get("sc", {})
+
+    # Build a clean sc:
+    # - re-added classes:  use engine.default_support (snapshot indices are stale)
+    # - classes present throughout: remap indices through idx_map (may be identity)
+    # - classes not in engine anymore: drop
+    restored_sc: dict = {}
+    for cname in engine.class_names:
+        if cname in readded:
+            restored_sc[cname] = engine.default_support.get(cname, [])
+            continue
+
+        items = raw_sc.get(cname, [])
+        if not items:
+            restored_sc[cname] = engine.default_support.get(cname, [])
+            continue
+
+        remapped = []
+        for it in items:
+            old_idx = it.get("idx")
+            if isinstance(old_idx, int):
+                new_idx = idx_map.get(old_idx, old_idx) if idx_map else old_idx
+                # Validate: index in range and label still matches
+                n = len(engine.images)
+                ci = engine.class_names.index(cname)
+                if new_idx < n and int(engine.labels[new_idx]) == ci:
+                    remapped.append({**it, "idx": new_idx})
+            else:
+                remapped.append(it)  # string / drawn item — keep as-is
+
+        restored_sc[cname] = remapped or engine.default_support.get(cname, [])
+
+    restored_classes = list(engine.class_names)
+    options = [{"label": c, "value": c} for c in restored_classes]
+    new_sel = (
+        current_sel_class
+        if current_sel_class in restored_classes
+        else (restored_classes[0] if restored_classes else None)
+    )
+    return restored_sc, restored_classes, options, new_sel
+
+
 # ── 4. Undo button ──────────────────────────────────────────
 
 
 @app.callback(
-    Output("sc-store", "data", allow_duplicate=True),
-    Output("active-classes-store", "data", allow_duplicate=True),
-    Output("color-map-store", "data", allow_duplicate=True),
-    Output("master-undo-store", "data", allow_duplicate=True),
-    Output("master-redo-store", "data", allow_duplicate=True),
-    Output("master-view-id", "data", allow_duplicate=True),
+    Output("sc-store",              "data",    allow_duplicate=True),
+    Output("active-classes-store",  "data",    allow_duplicate=True),
+    Output("pending-classes-store", "data",    allow_duplicate=True),
+    Output("color-map-store",       "data",    allow_duplicate=True),
+    Output("master-undo-store",     "data",    allow_duplicate=True),
+    Output("master-redo-store",     "data",    allow_duplicate=True),
+    Output("master-view-id",        "data",    allow_duplicate=True),
+    Output("class-selector",        "options", allow_duplicate=True),
+    Output("class-selector",        "value",   allow_duplicate=True),
     Input("undo-btn", "n_clicks"),
-    State("sc-store", "data"),
-    State("active-classes-store", "data"),
-    State("color-map-store", "data"),
-    State("master-undo-store", "data"),
-    State("master-redo-store", "data"),
-    State("master-view-id", "data"),
+    State("sc-store",              "data"),
+    State("active-classes-store",  "data"),
+    State("color-map-store",       "data"),
+    State("master-undo-store",     "data"),
+    State("master-redo-store",     "data"),
+    State("master-view-id",        "data"),
+    State("class-selector",        "value"),
     prevent_initial_call=True,
 )
-def handle_undo(n_clicks, sc, classes, colors, undo_stack, redo_stack, view_id):
+def handle_undo(n_clicks, sc, classes, colors, undo_stack, redo_stack, view_id, sel_class):
     if not n_clicks or not undo_stack:
         raise PreventUpdate
     undo_stack = list(undo_stack)
     redo_stack = list(redo_stack or [])
-    
-    # Store the exact state before we undo
+
     current_action_label = undo_stack[-1].get("desc", "?")
+
     redo_stack.append({
         "desc": f"Redo: {current_action_label}",
-        "sc": sc, 
-        "classes": classes, 
+        "sc": sc,
+        "classes": classes,
+        "engine_classes": list(engine.class_names),
         "colors": colors,
         "excluded": list(getattr(engine, "excluded_indices", set()))
     })
-    
+
     prev_state = undo_stack.pop()
-    if "excluded" in prev_state:
-        engine.excluded_indices = set(prev_state["excluded"])
-        
-    return prev_state.get("sc", {}), prev_state.get("classes", []), prev_state.get("colors", {}), undo_stack, redo_stack, (view_id or 0) + 1
+    restored_sc, restored_classes, options, new_sel = _restore_snapshot(prev_state, sel_class)
+
+    return (
+        restored_sc,
+        restored_classes,
+        restored_classes[:],
+        prev_state.get("colors", {}),
+        undo_stack,
+        redo_stack,
+        (view_id or 0) + 1,
+        options,
+        new_sel,
+    )
 
 
 # ── 5. Redo button ───────────────────────────────────────────────
 
 
 @app.callback(
-    Output("sc-store", "data", allow_duplicate=True),
-    Output("active-classes-store", "data", allow_duplicate=True),
-    Output("color-map-store", "data", allow_duplicate=True),
-    Output("master-undo-store", "data", allow_duplicate=True),
-    Output("master-redo-store", "data", allow_duplicate=True),
-    Output("master-view-id", "data", allow_duplicate=True),
+    Output("sc-store",              "data",    allow_duplicate=True),
+    Output("active-classes-store",  "data",    allow_duplicate=True),
+    Output("pending-classes-store", "data",    allow_duplicate=True),
+    Output("color-map-store",       "data",    allow_duplicate=True),
+    Output("master-undo-store",     "data",    allow_duplicate=True),
+    Output("master-redo-store",     "data",    allow_duplicate=True),
+    Output("master-view-id",        "data",    allow_duplicate=True),
+    Output("class-selector",        "options", allow_duplicate=True),
+    Output("class-selector",        "value",   allow_duplicate=True),
     Input("redo-btn", "n_clicks"),
-    State("sc-store", "data"),
-    State("active-classes-store", "data"),
-    State("color-map-store", "data"),
-    State("master-undo-store", "data"),
-    State("master-redo-store", "data"),
-    State("master-view-id", "data"),
+    State("sc-store",              "data"),
+    State("active-classes-store",  "data"),
+    State("color-map-store",       "data"),
+    State("master-undo-store",     "data"),
+    State("master-redo-store",     "data"),
+    State("master-view-id",        "data"),
+    State("class-selector",        "value"),
     prevent_initial_call=True,
 )
-def handle_redo(n_clicks, sc, classes, colors, undo_stack, redo_stack, view_id):
+def handle_redo(n_clicks, sc, classes, colors, undo_stack, redo_stack, view_id, sel_class):
     if not n_clicks or not redo_stack:
         raise PreventUpdate
     undo_stack = list(undo_stack or [])
     redo_stack = list(redo_stack)
-    
+
     next_state = redo_stack.pop()
-    
+
     current_action_label = next_state.get("desc", "?").replace("Redo: ", "")
     undo_stack.append({
         "desc": current_action_label,
-        "sc": sc, 
-        "classes": classes, 
+        "sc": sc,
+        "classes": classes,
+        "engine_classes": list(engine.class_names),
         "colors": colors,
         "excluded": list(getattr(engine, "excluded_indices", set()))
     })
     undo_stack = undo_stack[-_MAX_UNDO:]
-    
-    if "excluded" in next_state:
-        engine.excluded_indices = set(next_state["excluded"])
-        
-    return next_state.get("sc", {}), next_state.get("classes", []), next_state.get("colors", {}), undo_stack, redo_stack, (view_id or 0) + 1
+
+    restored_sc, restored_classes, options, new_sel = _restore_snapshot(next_state, sel_class)
+
+    return (
+        restored_sc,
+        restored_classes,
+        restored_classes[:],
+        next_state.get("colors", {}),
+        undo_stack,
+        redo_stack,
+        (view_id or 0) + 1,
+        options,
+        new_sel,
+    )
 
 
 @app.callback(
@@ -1038,9 +1156,12 @@ def update_history_ui(undo_stack):
     Input("pending-remove-store", "data"),
     Input("sidebar-mode-store", "data"),
     State("new-class-name-store", "data"),
+    State("import-selected-folder-store", "data"),
+    State("active-classes-store", "data"),
 )
 def render_detail_panel(sel_q, sc, temp, sel_class, sel_sup,
-                        whatif_sc, pending_rm, sidebar_mode, saved_class_name):
+                        whatif_sc, pending_rm, sidebar_mode, saved_class_name,
+                        import_folder, active_classes):
     """Show inspector or support set."""
     # Don't rebuild the canvas when sc-store or whatif-store update while the
     # draw panel is open — that would wipe the canvas and reset controls.
@@ -1056,7 +1177,9 @@ def render_detail_panel(sel_q, sc, temp, sel_class, sel_sup,
         return _render_candidates(sel_class, sc, temp, whatif_sc)
     elif sidebar_mode == "draw":
         return _render_canvas_tool(sel_class, sc, whatif_sc, saved_class_name)
-    return _render_support(sel_class, sc, sel_sup, temp, whatif_sc, pending_rm)
+    elif sidebar_mode == "import":
+        return _render_import_panel(import_folder, active_classes)
+    return _render_support(sel_class, sc, sel_sup, temp, whatif_sc, pending_rm, sidebar_mode)
 
 
 def _render_inspector(sel_q, sc, temp, whatif_sc=None):
@@ -1480,27 +1603,214 @@ def _render_canvas_tool(sel_class, sc, whatif_sc=None, saved_class_name=""):
     )
 
 
-def _render_support(sel_class, sc, sel_sup, temp,
-                    whatif_sc=None, pending_rm=None):
+def _file_to_base64(path: str, size: int = 40) -> str:
+    """Load a PNG from disk and return a base64 data-URI for inline <img>."""
+    try:
+        from PIL import Image as PILImage
+        img = PILImage.open(path).convert("L").resize((size, size), PILImage.NEAREST)
+        import io as _io, base64 as _b64
+        buf = _io.BytesIO()
+        img.save(buf, format="PNG")
+        return "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return ""
+
+
+def _render_import_panel(selected_folder: str | None, active_classes: list):
+    """Panel for importing images from custom_drawings/ as a new custom class."""
     header = html.Div(
         [
-            html.Label("SUPPORT SET", className="ctrl-label"),
             html.Button(
-                "CANDIDATES",
-                id={"type": "sidebar-nav", "id": "candidates"},
-                className="btn-accent",
-                style={"marginLeft": "auto", "fontSize": "11px", "padding": "4px 8px"},
+                "← BACK",
+                id={"type": "sidebar-nav", "id": "support"},
+                className="btn-small",
+                style={"marginRight": "8px"},
                 n_clicks=0,
             ),
+            html.Label("IMPORT FROM DRAWINGS", className="ctrl-label"),
+        ],
+        className="section-header",
+    )
+
+    folders = ALL_CUSTOM_DRAWING_CLASSES  # list of {name, count, preview_paths}
+    active_set = set(active_classes or engine.class_names)
+
+    if not folders:
+        return html.Div(
+            [header, html.Div("No folders found in custom_drawings/.", className="hint-text")],
+            className="draw-panel",
+            style={"display": "flex", "flexDirection": "column", "padding": "8px"},
+        )
+
+    # ── folder pill grid ──────────────────────────────────────────
+    pills = []
+    for info in folders:
+        fname = info["name"]
+        already_loaded = fname in active_set
+        is_selected = fname == selected_folder
+
+        if is_selected:
+            chip_style = {
+                "background": "rgba(232,164,32,0.25)",
+                "borderColor": "#e8a420",
+                "color": "#e8a420",
+                "borderWidth": "2px",
+                "borderStyle": "solid",
+            }
+            label = f"● {fname}"
+        elif already_loaded:
+            chip_style = {
+                "background": "rgba(80,160,80,0.08)",
+                "borderColor": "#50a050",
+                "color": "#50a050",
+                "borderWidth": "1px",
+                "borderStyle": "solid",
+                "opacity": "0.6",
+            }
+            label = f"✓ {fname}"
+        else:
+            chip_style = {
+                "background": "rgba(255,255,255,0.04)",
+                "borderColor": "#3a4235",
+                "color": "#c8c4a8",
+                "borderWidth": "1px",
+                "borderStyle": "solid",
+            }
+            label = fname
+
+        pills.append(html.Button(
+            label,
+            id={"type": "import-folder-chip", "name": fname},
+            className="class-chip",
+            n_clicks=0,
+            disabled=already_loaded,
+            title=f"{info['count']} images" + (" (already active)" if already_loaded else " — click to select"),
+            style={**chip_style, "fontSize": "11px", "padding": "4px 8px", "margin": "2px"},
+        ))
+
+    pill_grid = html.Div(pills, className="class-chip-grid", style={"marginTop": "10px"})
+
+    # ── preview strip (only when a folder is selected) ─────────────
+    preview_strip = html.Div()
+    selected_info = next((f for f in folders if f["name"] == selected_folder), None)
+    default_name = selected_folder or ""
+
+    if selected_info:
+        thumbs = []
+        for path in selected_info["preview_paths"]:
+            src = _file_to_base64(path, size=48)
+            if src:
+                thumbs.append(html.Img(
+                    src=src,
+                    style={"width": "48px", "height": "48px", "borderRadius": "4px",
+                           "border": "1px solid #3a4235", "margin": "2px"},
+                ))
+        count_badge = html.Span(
+            f"{selected_info['count']} images",
+            className="hint-text",
+            style={"fontSize": "10px", "color": "#7a7860", "marginLeft": "6px"},
+        )
+        preview_strip = html.Div(
+            [
+                html.Div(
+                    [
+                        html.Span(f"Selected: {selected_folder}", style={"fontWeight": "600", "color": "#c8c4a8"}),
+                        count_badge,
+                    ],
+                    style={"marginBottom": "4px", "fontSize": "11px"},
+                ),
+                html.Div(thumbs, style={"display": "flex", "flexWrap": "wrap"}),
+            ],
+            style={
+                "marginTop": "10px",
+                "background": "rgba(0,0,0,0.2)",
+                "borderRadius": "6px",
+                "padding": "8px",
+                "border": "1px solid #3a4235",
+            },
+        )
+
+    # ── import controls ────────────────────────────────────────────
+    already_active = default_name in active_set
+    import_disabled = not selected_folder or already_active
+
+    import_controls = html.Div(
+        [
+            html.Label("Class name:", className="ctrl-label",
+                       style={"marginTop": "12px", "marginBottom": "4px"}),
+            dcc.Input(
+                id="import-class-name-input",
+                value=default_name,
+                placeholder="Enter class name...",
+                debounce=True,
+                style={
+                    "width": "100%",
+                    "background": "#2a2a2a",
+                    "color": "white",
+                    "border": "1px solid #444",
+                    "padding": "4px",
+                    "borderRadius": "4px",
+                },
+            ),
+            html.Div(
+                "Class already active." if already_active else
+                ("Select a folder above." if not selected_folder else ""),
+                id="import-status-msg",
+                className="hint-text",
+                style={"marginTop": "4px", "color": "#c84040" if already_active else "#7a7860",
+                       "textAlign": "center"},
+            ),
             html.Button(
-                "DRAW",
-                id={"type": "sidebar-nav", "id": "draw"},
+                "IMPORT AS NEW CLASS  ▶",
+                id="import-class-btn",
                 className="btn-accent",
-                style={"marginLeft": "8px", "fontSize": "11px", "padding": "4px 8px"},
+                style={"width": "100%", "marginTop": "8px", "padding": "6px"},
+                disabled=import_disabled,
                 n_clicks=0,
             ),
         ],
-        className="section-header",
+        style={"marginTop": "auto"},
+    )
+
+    return html.Div(
+        [header, pill_grid, preview_strip, import_controls],
+        className="draw-panel",
+        style={"display": "flex", "flexDirection": "column", "minHeight": "460px", "padding": "8px"},
+    )
+
+
+def _render_support(sel_class, sc, sel_sup, temp,
+                    whatif_sc=None, pending_rm=None, sidebar_mode="support"):
+    header = html.Div(
+        [
+            html.Label("SUPPORT SET", className="ctrl-label", style={"textAlign": "center", "width": "100%", "marginBottom": "8px"}),
+            html.Div(
+                [
+                    html.Button(
+                        "CANDIDATES",
+                        id={"type": "sidebar-nav", "id": "candidates"},
+                        className="btn-group-item" + (" btn-group-item--active" if sidebar_mode == "candidates" else ""),
+                        n_clicks=0,
+                    ),
+                    html.Button(
+                        "DRAW",
+                        id={"type": "sidebar-nav", "id": "draw"},
+                        className="btn-group-item" + (" btn-group-item--active" if sidebar_mode == "draw" else ""),
+                        n_clicks=0,
+                    ),
+                    html.Button(
+                        "IMPORT",
+                        id={"type": "sidebar-nav", "id": "import"},
+                        className="btn-group-item" + (" btn-group-item--active" if sidebar_mode == "import" else ""),
+                        n_clicks=0,
+                        title="Import images from custom_drawings/ as a new class",
+                    ),
+                ],
+                className="btn-group",
+            ),
+        ],
+        className="section-header-vertical",
+        style={"display": "flex", "flexDirection": "column", "alignItems": "center", "marginBottom": "12px", "padding": "0 4px"}
     )
 
     items = list(sc.get(sel_class, []))
@@ -1908,9 +2218,10 @@ def _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view
                     decoded = __import__('base64').b64decode(encoded)
                     import time
                     from pathlib import Path
-                    save_dir = Path("drawings") / cname
+                    data_dir = Path(__file__).resolve().parent.parent / 'data' / 'quickdraw' / 'test'
+                    save_dir = data_dir / cname
                     save_dir.mkdir(parents=True, exist_ok=True)
-                    save_path = save_dir / f"{int(time.time())}.png"
+                    save_path = save_dir / f"drawn_{int(time.time())}.png"
                     
                     img = Image.open(__import__('io').BytesIO(decoded)).convert('L')
                     img.save(save_path)
@@ -2040,36 +2351,6 @@ def cancel_add(n):
 # ── 17. Changelog display ────────────────────────────────────────
 
 
-@app.callback(
-    Output("changelog-display", "children"),
-    Input("changelog-store", "data"),
-)
-def render_changelog(log):
-    if not log:
-        return []
-    items = []
-    for entry in log:
-        delta = entry["delta"]
-        delta_col = OK_COL if delta > 0.005 else (
-            ERR_COL if delta < -0.005 else TEXT2)
-        items.append(
-            html.Div(
-                [
-                    html.Span(entry["label"], className="log-label"),
-                    html.Span(
-                        f"{delta:+.1%}",
-                        className="log-delta",
-                        style={"color": delta_col},
-                    ),
-                ],
-                className="log-row",
-            )
-        )
-    return [
-        html.Div("HISTORY", className="log-header"),
-        html.Div(items, className="log-list"),
-    ]
-
 
 # ── P4-1. Class config label (shows N/total, click to expand) ────
 
@@ -2131,24 +2412,26 @@ def _resolve_color(cname: str, active_list: list, color_map: dict) -> str:
     Input("active-classes-store",  "data"),
     Input("pending-classes-store", "data"),
     Input("color-map-store",       "data"),
+    Input("custom-classes-store",  "data"),
 )
-def render_class_config_panel(active, pending, color_map):
+def render_class_config_panel(active, pending, color_map, custom_classes):
     active_list   = list(active  or engine.class_names)
     pending_list  = list(pending or active_list)
     active_set    = set(active_list)
     pending_set   = set(pending_list)
     color_map     = color_map or {}
+    custom_set    = set(custom_classes or [])
     cap           = len(CLASS_COLORS)
     n_pending     = len(pending_set)
     is_dirty      = pending_set != active_set
 
-    # ── Active chips (/currently in UMAP) ──────────────────────────
-    active_chips = []
-    for cname in ALL_CLASSES:
-        if cname not in active_set:
-            continue
+    # Pre-trained classes available to add (discovered at startup, not user-created)
+    pretrained_available = [c for c in ALL_CLASSES if c not in active_set and c not in custom_set]
+
+    def _make_active_chip(cname):
         staged_rm = cname not in pending_set
-        col    = _resolve_color(cname, active_list, color_map)
+        is_custom = cname in custom_set
+        col = _resolve_color(cname, active_list, color_map)
         r, g, b = int(col[1:3], 16), int(col[3:5], 16), int(col[5:7], 16)
         color_idx = color_map.get(cname, active_list.index(cname) % cap)
 
@@ -2156,23 +2439,22 @@ def render_class_config_panel(active, pending, color_map):
         if staged_rm:
             chip_cls += " class-chip--staged-rm"
 
-        # Color swatch cycle button
+        label = cname
+        if is_custom:
+            label = "✦ " + cname   # mark user-created with a distinct prefix
+
         swatch_btn = html.Button(
             "",
             id={"type": "color-swatch-btn", "name": cname},
             className="color-swatch-btn",
             n_clicks=0,
             title=f"Color: {COLOR_LABELS[color_idx % len(COLOR_LABELS)]} — click to cycle",
-            style={
-                "background": col,
-                "borderColor": col,
-            },
+            style={"background": col, "borderColor": col},
         )
-
         chip = html.Div(
             [
                 html.Button(
-                    ("✕ " if staged_rm else "● ") + cname,
+                    ("✕ " if staged_rm else "● ") + label,
                     id={"type": "class-chip", "name": cname},
                     className=chip_cls,
                     n_clicks=0,
@@ -2189,23 +2471,52 @@ def render_class_config_panel(active, pending, color_map):
             ],
             className="chip-with-swatch",
         )
-        active_chips.append(chip)
+        return chip
 
-    # ── Available chips (not in UMAP yet) ──────────────────────────
+    # ── ACTIVE section — all classes currently in UMAP ────────────
+    # Iterate active_list directly (not ALL_CLASSES) so user-created
+    # classes always appear here.
+    active_chips = [_make_active_chip(c) for c in active_list]
+
+    # ── CUSTOM section — user-created classes not currently active ─
+    custom_inactive = [c for c in custom_set if c not in active_set]
+    custom_chips = []
+    for cname in sorted(custom_inactive):
+        staged_add = cname in pending_set
+        at_cap = n_pending >= cap and not staged_add
+        chip_cls = "class-chip class-chip--custom-inactive"
+        if staged_add:
+            chip_cls += " class-chip--staged-add"
+        elif at_cap:
+            chip_cls += " class-chip--disabled"
+        custom_chips.append(html.Button(
+            ("+ ✦ " if staged_add else "○ ✦ ") + cname,
+            id={"type": "class-chip", "name": cname},
+            className=chip_cls,
+            n_clicks=0,
+            disabled=at_cap,
+            title="Staged to re-add — click to cancel" if staged_add else
+                  ("Cap reached" if at_cap else "Click to stage for re-adding"),
+            style={
+                "borderColor": "#50a050" if staged_add else "#5a97f2",
+                "color":       "#50a050" if staged_add else "#5a97f2",
+                "background":  "rgba(80,160,80,0.12)" if staged_add else "rgba(90,151,242,0.08)",
+                "borderWidth": "1px",
+                "borderStyle": "dashed",
+            },
+        ))
+
+    # ── AVAILABLE section — pre-trained classes not active ─────────
     available_chips = []
-    for cname in ALL_CLASSES:
-        if cname in active_set:
-            continue
+    for cname in pretrained_available:
         staged_add = cname in pending_set
         at_cap     = n_pending >= cap and not staged_add
-
         chip_cls = "class-chip"
         if staged_add:
             chip_cls += " class-chip--staged-add"
         elif at_cap:
             chip_cls += " class-chip--disabled"
-
-        chip = html.Button(
+        available_chips.append(html.Button(
             ("+ " if staged_add else "○ ") + cname,
             id={"type": "class-chip", "name": cname},
             className=chip_cls,
@@ -2215,13 +2526,11 @@ def render_class_config_panel(active, pending, color_map):
                   ("Cap reached" if at_cap else "Click to stage for adding"),
             style={
                 "borderColor": "#50a050" if staged_add else "#3a4235",
-                "color": "#50a050" if staged_add else "#7a7860",
-                "background": "rgba(80,160,80,0.12)" if staged_add else
-                              "rgba(255,255,255,0.03)",
+                "color":       "#50a050" if staged_add else "#7a7860",
+                "background":  "rgba(80,160,80,0.12)" if staged_add else "rgba(255,255,255,0.03)",
                 "borderWidth": "1px",
             },
-        )
-        available_chips.append(chip)
+        ))
 
     # ── APPLY button ───────────────────────────────────────────────
     apply_btn = html.Button(
@@ -2232,7 +2541,6 @@ def render_class_config_panel(active, pending, color_map):
         disabled=not is_dirty,
         title="Rebuild UMAP with the staged class selection",
     )
-
     cap_note = html.Div(
         f"{n_pending}/{cap} staged — press APPLY to rebuild UMAP",
         className="hint-text",
@@ -2243,19 +2551,37 @@ def render_class_config_panel(active, pending, color_map):
         style={"marginTop": "4px"},
     )
 
-    return [
+    sections = [
         html.Div("ACTIVE", className="chip-section-label"),
         html.Div(active_chips, className="class-chip-grid"),
-        html.Div("AVAILABLE", className="chip-section-label",
-                 style={"marginTop": "8px"}),
-        html.Div(available_chips, className="class-chip-grid class-chip-grid--available"),
-        html.Div(
-            [apply_btn],
-            className="apply-row",
-            style={"marginTop": "8px"},
-        ),
+    ]
+
+    if custom_chips:
+        sections += [
+            html.Div(
+                [
+                    html.Span("CUSTOM", className="chip-section-label"),
+                    html.Span(" ✦ user-drawn", className="chip-section-sublabel"),
+                ],
+                className="chip-section-header",
+                style={"marginTop": "8px"},
+            ),
+            html.Div(custom_chips, className="class-chip-grid class-chip-grid--available"),
+        ]
+
+    if available_chips:
+        sections += [
+            html.Div("AVAILABLE  (pre-trained)", className="chip-section-label",
+                     style={"marginTop": "8px"}),
+            html.Div(available_chips, className="class-chip-grid class-chip-grid--available"),
+        ]
+
+    sections += [
+        html.Div([apply_btn], className="apply-row", style={"marginTop": "8px"}),
         cap_note,
     ]
+
+    return sections
 
 
 # ── P4-4. Draft toggle — update pending-classes-store only ────────
@@ -2310,6 +2636,7 @@ def toggle_chip_draft(clicks, ids, active, pending):
     Output("sc-store",              "data",  allow_duplicate=True),
     Output("class-selector",        "options", allow_duplicate=True),
     Output("class-selector",        "value",  allow_duplicate=True),
+    Output("custom-classes-store",  "data",  allow_duplicate=True),
     Output("master-undo-store",     "data", allow_duplicate=True),
     Output("master-redo-store",     "data", allow_duplicate=True),
     Input("apply-classes-btn", "n_clicks"),
@@ -2337,8 +2664,9 @@ def apply_class_changes(n, active, pending, sc, colors, sel_class, undo_stack):
     undo_stack = list(undo_stack or [])
     undo_stack.append({
         "desc": "Modified Active Classes Map",
-        "sc": old_sc, 
-        "classes": active or list(engine.class_names), 
+        "sc": old_sc,
+        "classes": active or list(engine.class_names),
+        "engine_classes": list(engine.class_names),   # exact pre-change engine state
         "colors": colors or {},
         "excluded": list(getattr(engine, "excluded_indices", set()))
     })
@@ -2347,6 +2675,17 @@ def apply_class_changes(n, active, pending, sc, colors, sel_class, undo_stack):
     # Remove classes no longer wanted
     to_remove = active_set - pending_set
     if to_remove:
+        # Disk Cleanup: delete custom class directories from data/
+        data_dir = Path(__file__).resolve().parent.parent / 'data' / 'quickdraw' / 'test'
+        for name in to_remove:
+            cls_dir = data_dir / name
+            if cls_dir.exists() and any(cls_dir.glob("drawn_*.png")):
+                try:
+                    shutil.rmtree(cls_dir)
+                    print(f"Deleted custom class folder: {cls_dir}")
+                except Exception as e:
+                    print(f"Error deleting folder {cls_dir}: {e}")
+
         idx_map = engine.remove_classes(list(to_remove))
         for cname in list(sc.keys()):
             updated = []
@@ -2383,7 +2722,11 @@ def apply_class_changes(n, active, pending, sc, colors, sel_class, undo_stack):
     new_pending = new_active[:]               
     options     = [{"label": c, "value": c} for c in new_active]
     new_sel     = sel_class if sel_class in new_active else (new_active[0] if new_active else None)
-    return new_active, new_pending, sc, options, new_sel, undo_stack, []
+    
+    # Refresh custom classes from disk after deletions/additions
+    new_custom = _get_custom_classes_from_disk()
+    
+    return new_active, new_pending, sc, options, new_sel, new_custom, undo_stack, []
 
 
 # ── P4-8. Cycle class color ───────────────────────────────────────
@@ -2455,18 +2798,78 @@ def cycle_class_color(clicks, ids, sc, active, color_map, undo_stack):
     State("sc-store", "data"),
     State("active-classes-store", "data"),
     State("color-map-store", "data"),
+    State("custom-classes-store", "data"),
     prevent_initial_call=True,
 )
-def manual_save(n, sc, classes, colors):
+def manual_save(n, sc, classes, colors, custom_classes):
     if not n:
         raise PreventUpdate
     app_state = {
         "sc": sc or {},
         "classes": classes or list(engine.class_names),
-        "colors": colors or {}
+        "colors": colors or {},
+        "custom_classes": custom_classes or []
     }
+
     engine.save_session(_SESSION_PATH, app_state)
     return "● SAVED"
+
+
+# ── Button text auto-reset (clientside, Promise-based) ────────────
+# Each callback watches its button's children. When it detects a
+# confirmation string (starts with ✓ or ●) it returns a Promise that
+# resolves with the original label after 1 s — no server round-trip.
+
+app.clientside_callback(
+    """
+    function(text) {
+        if (!text || typeof text !== 'string') return window.dash_clientside.no_update;
+        if (text.startsWith('\u2713') || text.startsWith('\u2714')) {
+            return new Promise(function(resolve) {
+                setTimeout(function() { resolve('STAGE ADD'); }, 1000);
+            });
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("stage-draw-btn", "children", allow_duplicate=True),
+    Input("stage-draw-btn", "children"),
+    prevent_initial_call=True,
+)
+
+app.clientside_callback(
+    """
+    function(text) {
+        if (!text || typeof text !== 'string') return window.dash_clientside.no_update;
+        if (text.startsWith('\u2713') || text.startsWith('\u2714')) {
+            return new Promise(function(resolve) {
+                setTimeout(function() { resolve('ADD TO DATASET'); }, 1000);
+            });
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("add-query-btn", "children", allow_duplicate=True),
+    Input("add-query-btn", "children"),
+    prevent_initial_call=True,
+)
+
+app.clientside_callback(
+    """
+    function(text) {
+        if (!text || typeof text !== 'string') return window.dash_clientside.no_update;
+        if (text.startsWith('\u25cf') || text.startsWith('\u2713')) {
+            return new Promise(function(resolve) {
+                setTimeout(function() { resolve(''); }, 1000);
+            });
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output("save-indicator", "children", allow_duplicate=True),
+    Input("save-indicator", "children"),
+    prevent_initial_call=True,
+)
 
 
 # ── P4-6. Sync class-selector options on startup ──────────────────
@@ -2533,7 +2936,125 @@ def switch_sidebar_mode(clicks, ids):
         return "support", None, None
     elif btn_id == "draw":
         return "draw", None, None
+    elif btn_id == "import":
+        return "import", None, None
     raise PreventUpdate
+
+
+# ── Import panel — folder chip selection ──────────────────────────
+
+
+@app.callback(
+    Output("import-selected-folder-store", "data"),
+    Output("sidebar-mode-store", "data", allow_duplicate=True),
+    Input({"type": "import-folder-chip", "name": ALL}, "n_clicks"),
+    State({"type": "import-folder-chip", "name": ALL}, "id"),
+    State("import-selected-folder-store", "data"),
+    prevent_initial_call=True,
+)
+def select_import_folder(clicks, ids, current_folder):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    try:
+        triggered = ctx.triggered_id
+        if not isinstance(triggered, dict):
+            raise PreventUpdate
+        trig_val = ctx.triggered[0].get("value")
+        if not trig_val or trig_val < 1:
+            raise PreventUpdate
+        folder_name = triggered["name"]
+    except (KeyError, TypeError):
+        raise PreventUpdate
+
+    # Toggle: clicking same chip again deselects
+    new_folder = None if folder_name == current_folder else folder_name
+    return new_folder, "import"  # keep in import mode
+
+
+# ── Import panel — commit import ─────────────────────────────────
+
+
+@app.callback(
+    Output("active-classes-store",  "data",    allow_duplicate=True),
+    Output("pending-classes-store", "data",    allow_duplicate=True),
+    Output("sc-store",              "data",    allow_duplicate=True),
+    Output("class-selector",        "options", allow_duplicate=True),
+    Output("class-selector",        "value",   allow_duplicate=True),
+    Output("custom-classes-store",  "data",    allow_duplicate=True),
+    Output("import-selected-folder-store", "data", allow_duplicate=True),
+    Output("sidebar-mode-store",    "data",    allow_duplicate=True),
+    Output("master-undo-store",     "data",    allow_duplicate=True),
+    Output("master-redo-store",     "data",    allow_duplicate=True),
+    Input("import-class-btn", "n_clicks"),
+    State("import-selected-folder-store", "data"),
+    State("import-class-name-input", "value"),
+    State("active-classes-store",  "data"),
+    State("sc-store",              "data"),
+    State("color-map-store",       "data"),
+    State("class-selector",        "value"),
+    State("custom-classes-store",  "data"),
+    State("master-undo-store",     "data"),
+    prevent_initial_call=True,
+)
+def import_custom_class(n, source_folder, assign_name, active, sc, colors,
+                        sel_class, custom_classes, undo_stack):
+    if not n or not source_folder:
+        raise PreventUpdate
+
+    name = (assign_name or source_folder).strip()
+    if not name:
+        raise PreventUpdate
+
+    active_set = set(active or engine.class_names)
+    if name in active_set:
+        raise PreventUpdate  # already loaded, button should be disabled
+
+    cap = len(CLASS_COLORS)
+    if len(active_set) >= cap:
+        raise PreventUpdate
+
+    # Push undo snapshot before mutating engine
+    undo_stack = list(undo_stack or [])
+    undo_stack.append({
+        "desc": f"Imported custom class: {name}",
+        "sc": dict(sc or {}),
+        "classes": list(active or engine.class_names),
+        "engine_classes": list(engine.class_names),
+        "colors": colors or {},
+        "excluded": list(getattr(engine, "excluded_indices", set())),
+    })
+    undo_stack = undo_stack[-_MAX_UNDO:]
+
+    ok = engine.add_class_from_custom_drawings(name, source_folder=source_folder)
+    if not ok:
+        raise PreventUpdate
+
+    # Update support context
+    new_sc = dict(sc or {})
+    new_sc[name] = engine.default_support.get(name, [])
+
+    new_active  = list(engine.class_names)
+    new_pending = new_active[:]
+    options     = [{"label": c, "value": c} for c in new_active]
+    new_sel     = sel_class if sel_class in new_active else new_active[0]
+
+    # Update custom-classes-store
+    existing_custom = list(custom_classes or [])
+    if name not in existing_custom:
+        existing_custom.append(name)
+
+    # Persist session
+    engine.default_support = new_sc
+    engine.save_session(_SESSION_PATH, {
+        "sc": new_sc,
+        "classes": new_active,
+        "colors": colors or {},
+        "custom_classes": existing_custom,
+    })
+
+    return (new_active, new_pending, new_sc, options, new_sel,
+            existing_custom, None, "support", undo_stack, [])
 
 
 @app.callback(
@@ -3037,15 +3558,20 @@ def add_query_point(n, ghost_data, active_class_list, data_url, engine_ver):
     Output("new-class-drawings-store", "data", allow_duplicate=True),
     Output("sidebar-mode-store", "data", allow_duplicate=True),
     Output({"type": "assign-class-dropdown", "index": "main"}, "value"),
-    Output("active-classes-store",  "data", allow_duplicate=True),
-    Output("pending-classes-store", "data", allow_duplicate=True),
+    Output("active-classes-store",   "data", allow_duplicate=True),
+    Output("pending-classes-store",  "data", allow_duplicate=True),
+    Output("custom-classes-store",   "data", allow_duplicate=True),
+    Output("class-selector",         "options", allow_duplicate=True),
+    Output("class-selector",         "value",   allow_duplicate=True),
     Input("create-class-btn", "n_clicks"),
     State("new-class-name", "value"),
     State("new-class-drawings-store", "data"),
     State("sc-store", "data"),
+    State("custom-classes-store", "data"),
+    State("class-selector", "value"),
     prevent_initial_call=True
 )
-def create_new_class(n_clicks, class_name, drawings, sc):
+def create_new_class(n_clicks, class_name, drawings, sc, custom_classes, sel_class):
     if not n_clicks or not class_name or not drawings:
         raise PreventUpdate
         
@@ -3075,10 +3601,13 @@ def create_new_class(n_clicks, class_name, drawings, sc):
     new_sc = {c: list(v) for c, v in (sc or {}).items()}
     new_sc[class_name] = engine.default_support.get(class_name, [])
 
-    # Notify all class-list consumers so the main dropdown, config label,
-    # ACTIVE/AVAILABLE chips, and color swatches all reflect the new class.
     new_active = list(engine.class_names)
-    return new_sc, [], "support", class_name, new_active, new_active[:]
+    new_custom = list(custom_classes or [])
+    if class_name not in new_custom:
+        new_custom.append(class_name)
+
+    options = [{"label": c, "value": c} for c in new_active]
+    return new_sc, [], "support", class_name, new_active, new_active[:], new_custom, options, class_name
 
 
 # =====================================================================
