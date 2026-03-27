@@ -4,6 +4,12 @@ An interactive visual analytics dashboard for exploring and manipulating Prototy
 
 ---
 
+## A Note on Development
+
+The codebase for this project was largely written with the assistance of AI tools. However, all decisions regarding methodology, model architecture, UI design, application workflow, and system integration were made by us. The AI served as an implementation aid; the direction, reasoning, and design choices throughout are our own.
+
+---
+
 ## Table of Contents
 
 1. [Prerequisites](#prerequisites)
@@ -69,7 +75,7 @@ This will:
 
 The 29 classes span animals, food, vehicles, nature, objects, and geometric shapes (cat, dog, bird, fish, horse, apple, banana, cake, pizza, square, triangle, hexagon, diamond, car, bus, bicycle, truck, flower, cloud, lightning, mountain, clock, key, scissors, eyeglasses, door, table, chair, ladder).
 
-> **Note:** We are skipping the training step as it not relevant to the problem statement. The dashboard only needs the `data/quickdraw/test/` split and a trained checkpoint. We have the needed checkpoint under `checkpoints/best_model.pt`. 
+> **Note:** We are skipping the training step as it not relevant to the problem statement. The dashboard only needs the `data/quickdraw/test/` split and a trained checkpoint. We have the needed checkpoint under `checkpoints/best_model.pt`.
 
 ### Adding new classes later
 

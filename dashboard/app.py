@@ -708,15 +708,6 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _
         xx, ys, zz_class, zz_alpha = engine.decision_mesh(sc, temp, res=800)
         nc = len(order)
         res_val = zz_class.shape[0]
-        img_rgba = np.zeros((res_val, res_val, 4), dtype=np.uint8)
-        base_alpha = 115  # ~45% max opacity
-
-        import io, base64
-        from PIL import Image as PILImage
-
-        def hex_to_rgb(hx):
-            hx = hx.lstrip('#')
-            return tuple(int(hx[i:i+2], 16) for i in (0, 2, 4))
 
         # Topographic elevation bands driven by softmax confidence
         STEPS = 6
@@ -741,33 +732,10 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _
         edge_mask[:, 0]  = False
         edge_mask[:, -1] = False
 
-        for i in range(nc):
-            col_str = _resolve_color(order[i], list(engine.class_names), color_map)
-            try:
-                r, g, b = hex_to_rgb(col_str)
-            except Exception:
-                r, g, b = (128, 128, 128)
-
-            mask = (zz_class == i)
-            alpha_mask = zz_band[mask] / STEPS
-            final_alpha = alpha_mask * base_alpha
-            edge_boost  = np.where(edge_mask[mask], 180, final_alpha)
-
-            img_rgba[mask, 0] = r
-            img_rgba[mask, 1] = g
-            img_rgba[mask, 2] = b
-            img_rgba[mask, 3] = np.clip(edge_boost, 0, 255).astype(np.uint8)
-
-        # Plotly layout images draw from top-left; ys goes bottom-to-top — flip.
-        img_rgba = img_rgba[::-1, :, :]
-
-        img_pil = PILImage.fromarray(img_rgba)
-        buf = io.BytesIO()
-        img_pil.save(buf, format="PNG")
-        img_str = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-
         cached_mesh = {
-            "img_str": img_str,
+            "zz_class": zz_class,
+            "zz_band":  zz_band,
+            "edge_mask": edge_mask,
             "x0":    float(xx[0][0]),
             "y1":    float(ys[-1]),
             "sizex": float(xx[0][-1] - xx[0][0]),
@@ -778,9 +746,50 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _
             _mesh_cache["result"] = cached_mesh
 
     if cached_mesh:
+        # Re-apply colours on every call so color_map changes take effect immediately.
+        # The expensive geometry (cdist + softmax) is cached above; pixel colouring is cheap.
+        from PIL import Image as PILImage
+
+        def hex_to_rgb(hx):
+            hx = hx.lstrip('#')
+            return tuple(int(hx[i:i+2], 16) for i in (0, 2, 4))
+
+        zz_class  = cached_mesh["zz_class"]
+        zz_band   = cached_mesh["zz_band"]
+        edge_mask = cached_mesh["edge_mask"]
+        nc        = len(order)
+        res_val   = zz_class.shape[0]
+        base_alpha = 115
+        STEPS = 6
+
+        img_rgba = np.zeros((res_val, res_val, 4), dtype=np.uint8)
+        for i in range(nc):
+            col_str = _resolve_color(order[i], list(engine.class_names), color_map)
+            try:
+                r, g, b = hex_to_rgb(col_str)
+            except Exception:
+                r, g, b = (128, 128, 128)
+
+            mask = (zz_class == i)
+            alpha_mask  = zz_band[mask] / STEPS
+            final_alpha = alpha_mask * base_alpha
+            edge_boost  = np.where(edge_mask[mask], 180, final_alpha)
+
+            img_rgba[mask, 0] = r
+            img_rgba[mask, 1] = g
+            img_rgba[mask, 2] = b
+            img_rgba[mask, 3] = np.clip(edge_boost, 0, 255).astype(np.uint8)
+
+        # Plotly layout images draw from top-left; ys goes bottom-to-top — flip.
+        img_rgba = img_rgba[::-1, :, :]
+        img_pil  = PILImage.fromarray(img_rgba)
+        buf      = io.BytesIO()
+        img_pil.save(buf, format="PNG")
+        img_str  = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
         sfig.add_layout_image(
             dict(
-                source=cached_mesh["img_str"],
+                source=img_str,
                 xref="x", yref="y",
                 x=cached_mesh["x0"], y=cached_mesh["y1"],
                 sizex=cached_mesh["sizex"],
