@@ -388,10 +388,28 @@ app.layout = html.Div(
                                     className="detail-panel", 
                                     style={"display": "none"}
                                 ),
+                                html.Div(
+                                    [
+                                        html.Button(
+                                            "← BACK",
+                                            id={"type": "sidebar-nav", "id": "back-to-support"},
+                                            className="btn-small",
+                                            n_clicks=0,
+                                        ),
+                                    ],
+                                    id="back-btn-wrapper",
+                                    style={"display": "none", "marginBottom": "6px"},
+                                ),
                                 html.Div(id="support-panel", className="detail-panel", style={"display": "none"}),
                                 html.Div(
                                     [
-                                        html.Div(id="candidates-header", className="section-header"),
+                                        html.Div(
+                                            [
+                                                html.Div(id="candidates-header", className="section-header",
+                                                         style={"display": "inline-flex", "alignItems": "center", "flex": "1"}),
+                                            ],
+                                            style={"display": "flex", "alignItems": "center"},
+                                        ),
                                         dcc.Graph(
                                             id="candidate-scatter",
                                             figure=go.Figure(),
@@ -405,55 +423,10 @@ app.layout = html.Div(
                                     style={"display": "none", "flexDirection": "column", "height": "460px"}
                                 ),
                                 html.Div(
-                                    [
-                                        html.Div(id="draw-header", className="section-header"),
-                                        html.Div(
-                                            [
-                                                html.Canvas(
-                                                    id="draw-canvas",
-                                                    width=240, height=240,
-                                                    style={"background": "#000000", "border": "1px solid #3a4235", "cursor": "crosshair"}
-                                                ),
-                                                html.Div(id="draw-live-confidence",
-                                                         className="hint-text",
-                                                         style={"textAlign": "center", "marginTop": "6px", "color": "#aaaaaa"}),
-                                            ],
-                                            style={"display": "flex", "flexDirection": "column", "alignItems": "center", "marginTop": "12px"}
-                                        ),
-                                        html.Div(
-                                            [
-                                                html.Button("CLEAR", id="clear-canvas-btn", className="btn-small", n_clicks=0),
-                                                html.Button("UNDO", id="undo-canvas-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
-                                                html.Button("REDO", id="redo-canvas-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
-                                                html.Div(style={"flex": "1"}),
-                                                html.Button("BRUSH", id="brush-tool-btn", className="btn-small btn-accent", n_clicks=0),
-                                                html.Button("ERASER", id="eraser-tool-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
-                                            ],
-                                            className="draw-controls",
-                                            style={"display": "flex", "gap": "6px", "alignItems": "center", "marginTop": "8px"}
-                                        ),
-                                        html.Div(
-                                            [
-                                                dcc.Input(id="new-class-name", type="text", placeholder="Class Name...", autoComplete="off", style={"width": "100%", "marginTop": "8px", "background": "#2a2a2a", "color": "white", "border": "1px solid #444", "padding": "4px", "borderRadius": "4px"}),
-                                                html.Div("0 of 2 drawn", id="new-class-progress", className="hint-text", style={"marginTop": "4px", "color": "#ffaa00", "textAlign": "center"}),
-                                                html.Button("CREATE CLASS", id="create-class-btn", className="btn-accent", style={"width": "100%", "marginTop": "8px", "padding": "6px"}, disabled=True, n_clicks=0),
-                                            ],
-                                            id="new-class-controls",
-                                            style={"display": "none"}
-                                        ),
-                                        html.Div(
-                                            [
-                                                dcc.Dropdown(id={"type": "assign-class-dropdown", "index": "main"}, options=[], searchable=False),
-                                                html.Button(id="stage-draw-btn"),
-                                                html.Button(id="add-query-btn"),
-                                            ],
-                                            id="draw-assign-row", 
-                                            style={"marginTop": "auto"}
-                                        )
-                                    ],
+                                    [],
                                     id="draw-panel",
                                     className="detail-panel draw-panel",
-                                    style={"display": "none", "flexDirection": "column", "height": "460px", "padding": "8px"}
+                                    style={"display": "none", "flexDirection": "column", "padding": "8px"}
                                 ),
                                 html.Div(
                                     [],
@@ -530,11 +503,16 @@ app.layout = html.Div(
                 # Dummy anchors for pattern-matched callbacks to avoid broken UI in visible panels
                 dcc.Dropdown(id={"type": "infl-why-mode", "index": "dummy"}, options=[], searchable=False, className="infl-filter-drop"),
                 dcc.Dropdown(id={"type": "infl-class-filter", "index": "dummy"}, options=[], searchable=False, className="infl-filter-drop"),
-                dcc.Dropdown(id={"type": "assign-class-dropdown", "index": "dummy"}, options=[], searchable=False),
+                dcc.Dropdown(id={"type": "assign-class-dropdown", "index": "dummy"}, options=[], searchable=False, style={"display": "none"}),
                 html.Button(id={"type": "clear-sel-btn", "index": "inspector"}),
                 html.Button(id="apply-classes-btn", style={"display": "none"}),
                 html.Button(id="export-support-btn", style={"display": "none"}),
                 html.Button(id="view-wrong-btn", style={"display": "none"}),
+                html.Button(id="apply-graph-btn", style={"display": "none"}, n_clicks=0),
+                # Dummy anchors for import panel pattern-matched components
+                html.Button(id={"type": "import-class-btn", "index": "dummy"}, style={"display": "none"}, n_clicks=0),
+                dcc.Input(id={"type": "import-class-name-input", "index": "dummy"}, style={"display": "none"}),
+                html.Button(id={"type": "import-folder-chip", "name": "dummy"}, style={"display": "none"}, n_clicks=0),
             ],
             id="dummy-container",
             style={"display": "none"}
@@ -588,20 +566,24 @@ app.clientside_callback(
         var cands     = {display: 'none'};
         var draw       = {display: 'none'};
         var imp       = {display: 'none'};
+        var backBtn    = {display: 'none'};
 
         if (mode === 'candidates') {
             cands = {display: 'flex'};
+            backBtn = {display: 'block', marginBottom: '6px'};
         } else if (mode === 'draw') {
             draw = {display: 'flex'};
+            backBtn = {display: 'block', marginBottom: '6px'};
         } else if (mode === 'import') {
             imp = {display: 'flex'};
+            backBtn = {display: 'block', marginBottom: '6px'};
         } else if (sel_q !== null) {
             inspector = {display: 'block'};
         } else {
             support = {display: 'block'};
         }
 
-        return [inspector, support, cands, draw, imp];
+        return [inspector, support, cands, draw, imp, backBtn];
     }
     """,
     [
@@ -610,6 +592,7 @@ app.clientside_callback(
         Output("candidates-panel", "style"),
         Output("draw-panel",       "style"),
         Output("import-panel",     "style"),
+        Output("back-btn-wrapper", "style"),
     ],
     [
         Input("sidebar-mode-store", "data"),
@@ -659,9 +642,9 @@ def _mesh_cache_key(sc: dict, temp: float) -> str:
     State("highlight-store", "data"),
     State("master-view-id", "data"),
 )
-def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, active_class_list, _engine_ver, sel_q, hl_idxs, uirev):
+def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _engine_ver, sel_q, hl_idxs, uirev):
     color_map = color_map or {}
-    active_class = active_class_list[0] if active_class_list else None
+    active_class = next((v for v in (_class_vals or []) if v and v != "CREATE_NEW"), None)
 
     res = engine.classify(sc, temp)
     order = res["order"]
@@ -1724,10 +1707,10 @@ def render_detail_panel_content(sel_q, sc, temp, sel_class, sel_sup,
     if sidebar_mode == "candidates":
         cand_header, cand_footer = _render_candidates_parts(sel_class, sc, temp, whatif_sc)
 
-    # 4. Draw (Surgical updates to persistent panel)
-    draw_header, draw_nc_style, draw_nc_prog, draw_create_dis, draw_assign_row, draw_add_q_style = [no_update]*6
+    # 4. Draw — replace entire panel children (old method, preserves canvas JS)
+    draw_panel_children = no_update
     if sidebar_mode == "draw":
-        draw_header, draw_nc_style, draw_nc_prog, draw_create_dis, draw_assign_row, draw_add_q_style = _render_canvas_tool_parts(sel_class, sc, whatif_sc, saved_class_name)
+        draw_panel_children = _render_canvas_tool(sel_class, sc, whatif_sc, saved_class_name)
 
     # 5. Import
     import_children = no_update
@@ -1735,8 +1718,7 @@ def render_detail_panel_content(sel_q, sc, temp, sel_class, sel_sup,
         import_children = _render_import_panel(import_folder, active_classes)
 
     return (inspector_children, support_children, cand_header, cand_footer,
-            draw_header, draw_nc_style, draw_nc_prog, draw_create_dis, draw_assign_row, draw_add_q_style,
-            import_children)
+            draw_panel_children, import_children)
 
 
 @app.callback(
@@ -1744,12 +1726,7 @@ def render_detail_panel_content(sel_q, sc, temp, sel_class, sel_sup,
     Output("support-panel",    "children"),
     Output("candidates-header", "children"),
     Output("candidate-footer", "children"),
-    Output("draw-header",      "children"),
-    Output("new-class-controls", "style",   allow_duplicate=True),
-    Output("new-class-progress", "children", allow_duplicate=True),
-    Output("create-class-btn",   "disabled", allow_duplicate=True),
-    Output("draw-assign-row",    "children"),
-    Output("add-query-btn",      "style",    allow_duplicate=True),
+    Output("draw-panel",       "children"),
     Output("import-panel",       "children"),
     Input("sel-query-store",      "data"),
     Input("sc-store",             "data"),
@@ -2222,13 +2199,6 @@ def _render_inspector(sel_q, sc, temp, whatif_sc=None, infl_filter=None):
 def _render_candidates_parts(sel_class, sc, temp, whatif_sc=None):
     cands = engine.class_images_pool(sel_class, sc)
     header = [
-        html.Button(
-            "← BACK",
-            id={"type": "sidebar-nav", "id": "back-to-support"},
-            className="btn-small",
-            style={"marginRight": "8px"},
-            n_clicks=0,
-        ),
         html.Label(f"{sel_class.upper()} GRAPH SUPPORT", className="ctrl-label"),
     ]
     if not cands:
@@ -2263,41 +2233,64 @@ def _render_candidates_parts(sel_class, sc, temp, whatif_sc=None):
     return header, footer_content
 
 
-def _render_canvas_tool_parts(sel_class, sc, whatif_sc=None, saved_class_name=""):
+def _render_canvas_tool(sel_class, sc, whatif_sc=None, saved_class_name=""):
     use_sc = whatif_sc if whatif_sc else sc
-    header = [
-        html.Button(
-            "← BACK",
-            id={"type": "sidebar-nav", "id": "back-to-support"},
-            className="btn-small",
-            style={"marginRight": "8px"},
-            n_clicks=0,
-        ),
-        html.Label("DRAW SKETCH", className="ctrl-label"),
-    ]
-    
-    # New class mode logic (dummy version or based on some store state)
     is_create_new = (sel_class == "CREATE_NEW")
-    nc_style = {"display": "block"} if is_create_new else {"display": "none"}
-    
-    # These might need more logic from a store, but for now we'll keep them simple
-    nc_progress = "0 of 2 drawn"
-    create_disabled = True
 
-    assign_row = [
-        html.Label("Assign to:", className="ctrl-label", style={"marginTop": "12px"}),
+    canvas_container = html.Div(
+        [
+            html.Canvas(
+                id="draw-canvas",
+                width=240, height=240,
+                style={"background": "#000000", "border": "1px solid #3a4235", "cursor": "crosshair"}
+            ),
+            html.Div(id="draw-live-confidence",
+                     className="hint-text",
+                     style={"textAlign": "center", "marginTop": "6px", "color": "#aaaaaa"}),
+        ],
+        style={"display": "flex", "flexDirection": "column", "alignItems": "center", "marginTop": "12px"}
+    )
+
+    controls = html.Div([
+        html.Button("CLEAR", id="clear-canvas-btn", className="btn-small", n_clicks=0),
+        html.Button("UNDO", id="undo-canvas-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
+        html.Button("REDO", id="redo-canvas-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
+        html.Div(style={"flex": "1"}),
+        html.Button("BRUSH", id="brush-tool-btn", className="btn-small btn-accent", n_clicks=0),
+        html.Button("ERASER", id="eraser-tool-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
+    ], className="draw-controls", style={"display": "flex", "gap": "6px", "alignItems": "center", "marginTop": "8px"})
+
+    new_class_controls = html.Div([
+        dcc.Input(id="new-class-name", value=saved_class_name, placeholder="Enter class name...",
+                  debounce=True, autoComplete="off",
+                  style={"width": "100%", "marginTop": "8px", "background": "#2a2a2a",
+                         "color": "white", "border": "1px solid #444", "padding": "4px", "borderRadius": "4px"}),
+        html.Div("0 of 2 drawn", id="new-class-progress", className="hint-text",
+                 style={"marginTop": "4px", "color": "#ffaa00", "textAlign": "center"}),
+        html.Button("CREATE CLASS", id="create-class-btn", className="btn-accent",
+                    style={"width": "100%", "marginTop": "8px", "padding": "6px"}, disabled=True, n_clicks=0),
+    ], id="new-class-controls", style={"display": "block" if is_create_new else "none"})
+
+    assign_row = html.Div([
+        html.Label("ASSIGN TO:", className="ctrl-label", style={"marginTop": "12px", "marginBottom": "4px"}),
         dcc.Dropdown(
-            id={"type": "assign-class-dropdown", "index": "main"},
-            options=[{"label": f"{c.upper()} ({len(use_sc.get(c, []))})", "value": c} for c in engine.class_names] + [{"label": "+ Create New Class", "value": "CREATE_NEW"}],
+            id={"type": "assign-class-dropdown", "index": "draw"},
+            options=[{"label": f"{c.upper()} ({len(use_sc.get(c, []))})", "value": c}
+                     for c in engine.class_names] + [{"label": "+ Create New Class", "value": "CREATE_NEW"}],
             value=sel_class,
             className="class-dropdown",
             clearable=False
         ),
-    ]
-    
-    add_q_style = {"display": "none", "width": "100%", "marginTop": "6px"} if is_create_new else {"display": "block", "width": "100%", "marginTop": "6px"}
-    
-    return header, nc_style, nc_progress, create_disabled, assign_row, add_q_style
+        new_class_controls,
+        html.Button("STAGE ADD", id="stage-draw-btn", className="btn-accent",
+                    style={"width": "100%", "marginTop": "12px"}, n_clicks=0),
+        html.Button("ADD TO DATASET", id="add-query-btn", className="btn-small",
+                    style={"width": "100%", "marginTop": "6px",
+                           "display": "none" if is_create_new else "block"},
+                    n_clicks=0, title="Add this drawing as a query/test point (not support)"),
+    ], style={"marginTop": "auto"})
+
+    return [canvas_container, controls, assign_row]
 
 
 def _file_to_base64(path: str, size: int = 40) -> str:
@@ -2316,16 +2309,7 @@ def _file_to_base64(path: str, size: int = 40) -> str:
 def _render_import_panel(selected_folder: str | None, active_classes: list):
     """Panel for importing images from custom_drawings/ as a new custom class."""
     header = html.Div(
-        [
-            html.Button(
-                "← BACK",
-                id={"type": "sidebar-nav", "id": "support"},
-                className="btn-small",
-                style={"marginRight": "8px"},
-                n_clicks=0,
-            ),
-            html.Label("IMPORT FROM DRAWINGS", className="ctrl-label"),
-        ],
+        [html.Label("IMPORT FROM DRAWINGS", className="ctrl-label")],
         className="section-header",
     )
 
@@ -3707,9 +3691,10 @@ def reset_all(n):
 # ── Phase 5 Callbacks (Candidate Pool) ───────────────────────────
 
 @app.callback(
-    Output("sidebar-mode-store", "data", allow_duplicate=True),
-    Output("whatif-store", "data", allow_duplicate=True),
+    Output("sidebar-mode-store",   "data", allow_duplicate=True),
+    Output("whatif-store",         "data", allow_duplicate=True),
     Output("pending-remove-store", "data", allow_duplicate=True),
+    Output("drawing-ghost-store",  "data", allow_duplicate=True),
     Input({"type": "sidebar-nav", "id": ALL}, "n_clicks"),
     State({"type": "sidebar-nav", "id": ALL}, "id"),
     prevent_initial_call=True,
@@ -3724,19 +3709,19 @@ def switch_sidebar_mode(clicks, ids):
         raise PreventUpdate
         
     btn_id = triggered_id.get("id")
-    # Guard against initial mounts trigger for ALL pattern match
-    if all(v in (None, 0) for v in (clicks or [])):
+
+    triggered_value = ctx.triggered[0]["value"]
+    if not triggered_value or triggered_value == 0:
         raise PreventUpdate
 
-
     if btn_id == "candidates":
-        return "candidates", None, None
+        return "candidates", None, None, None
     elif btn_id == "support" or btn_id == "back-to-support":
-        return "support", None, None
+        return "support", None, None, None
     elif btn_id == "draw":
-        return "draw", None, None
+        return "draw", None, None, no_update  # keep ghost when entering draw
     elif btn_id == "import":
-        return "import", None, None
+        return "import", None, None, None
     raise PreventUpdate
 
 
@@ -4283,14 +4268,12 @@ from io import BytesIO
     Input("drawing-strokes-store", "data"),
     State("sc-store", "data"),
     State("temp-slider", "value"),
-    State({"type": "assign-class-dropdown", "index": ALL}, "value"),
+    State({"type": "assign-class-dropdown", "index": "draw"}, "value"),
     prevent_initial_call=True
 )
-def process_draw_strokes(data_url, sc, temp, active_class_list):
+def process_draw_strokes(data_url, sc, temp, active_class):
     if not data_url or "base64," not in data_url:
         raise PreventUpdate
-    
-    active_class = active_class_list[0] if active_class_list else None
     try:
         from PIL import Image
         header, encoded = data_url.split("base64,")
@@ -4323,6 +4306,17 @@ def process_draw_strokes(data_url, sc, temp, active_class_list):
         raise PreventUpdate
 
 # toggle_new_class_controls was merged into render_detail_panels_callback
+# but needs to be standalone to react to dropdown changes in real-time
+@app.callback(
+    Output("new-class-controls", "style", allow_duplicate=True),
+    Output("add-query-btn",      "style", allow_duplicate=True),
+    Input({"type": "assign-class-dropdown", "index": "draw"}, "value"),
+    prevent_initial_call=True,
+)
+def toggle_new_class_controls(assign_class):
+    if assign_class == "CREATE_NEW":
+        return {"display": "block"}, {"display": "none", "width": "100%", "marginTop": "6px"}
+    return {"display": "none"}, {"display": "block", "width": "100%", "marginTop": "6px"}
 
 
 
@@ -4347,17 +4341,16 @@ def save_new_class_name(val):
     Output("sc-store", "data", allow_duplicate=True),
     Input("stage-draw-btn", "n_clicks"),
     State("drawing-ghost-store", "data"),
-    State({"type": "assign-class-dropdown", "index": ALL}, "value"),
+    State({"type": "assign-class-dropdown", "index": "draw"}, "value"),
     State("sc-store", "data"),
     State("drawing-strokes-store", "data"),
     State("whatif-store", "data"),
     State("new-class-drawings-store", "data"),
     prevent_initial_call=True
 )
-def stage_drawn_image(n, ghost_data, active_class_list, sc, data_url, whatif_sc, new_drawings):
+def stage_drawn_image(n, ghost_data, assign_class, sc, data_url, whatif_sc, new_drawings):
     if not n or not ghost_data:
         raise PreventUpdate
-    
     if not assign_class:
         raise PreventUpdate
         
@@ -4404,21 +4397,20 @@ def stage_drawn_image(n, ghost_data, active_class_list, sc, data_url, whatif_sc,
 @app.callback(
     Output("engine-version-store", "data", allow_duplicate=True),
     Output("add-query-btn", "children"),
+    Output("drawing-ghost-store", "data", allow_duplicate=True),
     Input("add-query-btn", "n_clicks"),
     State("drawing-ghost-store", "data"),
-    State({"type": "assign-class-dropdown", "index": ALL}, "value"),
+    State({"type": "assign-class-dropdown", "index": "draw"}, "value"),
     State("drawing-strokes-store", "data"),
     State("engine-version-store", "data"),
     prevent_initial_call=True,
 )
-def add_query_point(n, ghost_data, active_class_list, data_url, engine_ver):
+def add_query_point(n, ghost_data, assign_class, data_url, engine_ver):
     """Add a drawn sketch as a query/test point (not a support item).
     It lands on the scatter as a classifiable ○/✕ point for its class,
     without affecting prototypes or sc-store at all."""
     if not n or not ghost_data:
         raise PreventUpdate
-
-    assign_class = active_class_list[0] if active_class_list else None
     if not assign_class or assign_class == "CREATE_NEW":
         raise PreventUpdate
 
@@ -4441,7 +4433,8 @@ def add_query_point(n, ghost_data, active_class_list, data_url, engine_ver):
     if new_idx == -1:
         raise PreventUpdate
 
-    return (engine_ver or 0) + 1, f"✓ Query point added to {assign_class.upper()}"
+    # Clear ghost so the real point is visible (ghost was masking it)
+    return (engine_ver or 0) + 1, f"✓ Added to {assign_class.upper()}", None
 
 
 @app.callback(
