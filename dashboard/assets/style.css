@@ -200,8 +200,8 @@ body {
 }
 
 .sidebar--expanded {
-    width: 600px !important;
-    min-width: 600px !important;
+    width: 420px !important;
+    min-width: 420px !important;
 }
 
 .sidebar::-webkit-scrollbar {
@@ -639,7 +639,8 @@ body {
     background: rgba(0, 0, 0, 0.25);
     margin: 0 auto;
     overflow: hidden;
-    width: 200px; /* Reduced from 240px */
+    width: 200px;
+    /* Reduced from 240px */
 }
 
 .btn-group-item {
@@ -654,7 +655,8 @@ body {
     font-family: Consolas, 'Courier New', monospace;
     letter-spacing: 0.5px;
     font-weight: 700;
-    height: 25px; /* Reduced from 30px */
+    height: 25px;
+    /* Reduced from 30px */
     flex: 1;
     display: flex;
     align-items: center;
@@ -679,7 +681,7 @@ body {
 .btn-group-item--active {
     background: rgba(232, 164, 32, 0.2);
     color: #e8a420;
-    box-shadow: inset 0 0 4px rgba(0,0,0,0.4);
+    box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.4);
 }
 
 /* ==========================================================
@@ -1125,11 +1127,13 @@ button.inline-cancel--lg:hover {
 .why-thumb {
     width: 32px;
     height: 32px;
-    border-radius: 2px;
+    border-radius: 4px;
     border: 1px solid #3a4235;
     image-rendering: pixelated;
     background: #fff;
     flex-shrink: 0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    transition: all 0.15s ease;
 }
 
 .why-bar-col {
@@ -1431,4 +1435,380 @@ button.class-chip--custom-inactive {
     border-style: dashed !important;
     border-color: #5a97f2 !important;
     color: #5a97f2 !important;
+}
+
+/* ==========================================================
+   NEAREST SUPPORT SKETCHES — Option C card layout (v2)
+   ========================================================== */
+
+/* filter row */
+.infl-filter-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.infl-filter-drop {
+    font-size: 9px !important;
+    min-width: 60px;
+}
+
+.infl-filter-drop .Select-control {
+    background: #1a1d17 !important;
+    border: 1px solid #3a4235 !important;
+    border-radius: 2px !important;
+    height: 22px !important;
+    min-height: 22px !important;
+}
+
+.infl-filter-drop .Select-value-label,
+.infl-filter-drop .Select-placeholder {
+    font-size: 9px !important;
+    line-height: 22px !important;
+    color: #c8c4a8 !important;
+    font-family: Consolas, 'Courier New', monospace !important;
+}
+
+.infl-filter-drop .Select-arrow-zone {
+    padding: 0 2px !important;
+}
+
+.infl-filter-drop .Select-menu-outer {
+    background: #1a1d17 !important;
+    border: 1px solid #3a4235 !important;
+    font-size: 9px !important;
+    z-index: 1000 !important;
+}
+
+/* ── Card row ─────────────────────────────────────── */
+.infl-row {
+    display: flex;
+    flex-direction: column;
+    background: #232820;
+    /* solid CARD_BG, not see-through */
+    border: 1px solid #3a4235;
+    border-left: 3px solid var(--cls-col, #3a4235);
+    /* class color accent */
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 6px;
+    cursor: default;
+    transition: border-color 0.18s ease, filter 0.18s ease;
+}
+
+.infl-row:hover {
+    border-color: #5a6455;
+    border-left-color: var(--cls-col, #5a6455);
+    filter: brightness(1.08);
+}
+
+/* ── Card top: thumbnail + info body ─────────────── */
+.infl-card-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px 0;
+}
+
+/* thumbnail — 48px, neutral border, no per-class color bleeding */
+.infl-card-top .why-thumb {
+    width: 48px;
+    height: 48px;
+    flex-shrink: 0;
+    border-radius: 3px;
+    border: 1px solid #3a4235;
+    image-rendering: pixelated;
+    background: #fff;
+    cursor: pointer;
+    transition: border-color 0.12s, box-shadow 0.12s;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+
+.infl-card-top .why-thumb:hover {
+    border-color: #e8a420;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+}
+
+/* right column inside card-top */
+.infl-card-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    justify-content: center;
+}
+
+/* Line 1: class pill + PREDICTED badge */
+.infl-card-pill-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.infl-cls-pill {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 1px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    white-space: nowrap;
+    display: inline-block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 110px;
+    border: 1px solid transparent;
+    /* color set inline */
+}
+
+.infl-predicted-badge {
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: #e8a420;
+    background: rgba(232, 164, 32, 0.10);
+    border: 1px solid rgba(232, 164, 32, 0.40);
+    border-radius: 2px;
+    padding: 1px 5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    text-transform: uppercase;
+}
+
+/* Line 2: metric numbers + activation toggle */
+.infl-card-meta-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding-bottom: 7px;
+    /* breathing room above the bar */
+}
+
+.infl-metrics-line {
+    font-family: Consolas, 'Courier New', monospace;
+    font-size: 10px;
+    white-space: nowrap;
+    display: flex;
+    align-items: baseline;
+    gap: 0;
+}
+
+.infl-metric-label {
+    font-size: 8px;
+    letter-spacing: 0.6px;
+    color: #5a5e54;
+    text-transform: uppercase;
+    margin-right: 2px;
+}
+
+.infl-metric-val {
+    font-size: 12px;
+    font-weight: 700;
+    color: #c8c4a8;
+    letter-spacing: 0;
+}
+
+.infl-metric-sep {
+    color: #3a4235;
+    font-size: 11px;
+    padding: 0 4px;
+}
+
+/* activation → styled as a small bordered monospace pill */
+.infl-coact-link {
+    font-size: 8px !important;
+    font-family: Consolas, 'Courier New', monospace !important;
+    letter-spacing: 0.5px !important;
+    color: #5a5e54 !important;
+    background: transparent !important;
+    border: 1px solid #3a4235 !important;
+    border-radius: 2px !important;
+    padding: 1px 5px !important;
+    cursor: pointer !important;
+    white-space: nowrap;
+    flex-shrink: 0;
+    text-transform: uppercase;
+    transition: color 0.12s, border-color 0.12s;
+    line-height: 1.5 !important;
+}
+
+.infl-coact-link:hover {
+    color: #e8a420 !important;
+    border-color: rgba(232, 164, 32, 0.5) !important;
+}
+
+/* clickable support thumbnails */
+.support-thumb {
+    cursor: pointer;
+    transition: filter 0.12s, border-color 0.12s;
+}
+
+.support-thumb:hover {
+    filter: brightness(1.2);
+    border-color: #e8a420;
+}
+
+/* ── Full-width similarity bar at card bottom ─────── */
+.infl-sim-bar-track {
+    width: 100%;
+    height: 5px;
+    background: #1a1d17;
+    flex-shrink: 0;
+}
+
+.infl-sim-bar-fill {
+    height: 100%;
+    transition: width 0.3s ease;
+    opacity: 0.7;
+}
+
+.infl-row:hover .infl-sim-bar-fill {
+    opacity: 1;
+}
+
+/* ── Co-activation panel ────────────────────────── */
+.coact-panel {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 12px;
+    background: #1a1d17;
+    border-top: 1px solid #3a4235;
+}
+
+.coact-img {
+    width: 48px;
+    height: 48px;
+    border-radius: 2px;
+    border: 1px solid #3a4235;
+    image-rendering: pixelated;
+}
+
+.coact-sep {
+    color: #5a5e54;
+    font-size: 14px;
+}
+
+/* legacy stubs — no longer rendered, silenced for safety */
+.infl-thumb-col {
+    flex-shrink: 0;
+}
+
+.infl-cls-col {
+    flex: 0 0 62px;
+    min-width: 0;
+}
+
+.infl-col-heads,
+.infl-col-head,
+.infl-col-right,
+.infl-num,
+.infl-proto-num,
+.coact-toggle-btn {
+    display: none;
+}
+
+/* ==========================================================
+   OVERVIEW TABS  (accuracy bars | confusion matrix)
+   ========================================================== */
+
+.overview-container {
+    width: 100%;
+}
+
+/* confusion-panel just needs to hold the dcc.Graph */
+.confusion-panel {
+    width: 100%;
+}
+
+/* Candidate View Flash Fix */
+.candidates-panel .dash-graph {
+    background-color: #1a1d17 !important;
+    /* DARK_BG */
+}
+
+/* ==========================================================
+   COLLAPSIBLE CLASS GROUPS (nearest support sketches panel)
+   ========================================================== */
+
+.cls-group {
+    margin-bottom: 4px;
+    border-left: 2px solid transparent;
+    border-radius: 2px;
+}
+
+.cls-group[open] {
+    border-left-color: var(--cls-col, #7a7860);
+}
+
+.cls-group-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    cursor: pointer;
+    border-radius: 2px;
+    list-style: none;
+    user-select: none;
+    transition: background 0.15s;
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+/* cross-browser: hide the default marker */
+.cls-group-summary::-webkit-details-marker {
+    display: none;
+}
+
+.cls-group-summary::marker {
+    display: none;
+}
+
+.cls-group-summary::before {
+    content: "▶";
+    font-size: 8px;
+    color: #5a6050;
+    transition: transform 0.15s;
+    flex-shrink: 0;
+}
+
+.cls-group[open]>.cls-group-summary::before {
+    transform: rotate(90deg);
+}
+
+.cls-group-summary:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.cls-group-name {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-family: Consolas, monospace;
+}
+
+.cls-group-proto {
+    font-size: 11px;
+    font-family: Consolas, monospace;
+}
+
+.cls-group-badge {
+    font-size: 9px;
+    color: #7cbf7c;
+    opacity: 0.85;
+    font-family: Consolas, monospace;
+    letter-spacing: 0.05em;
+}
+
+.cls-group-body {
+    padding-left: 12px;
+    padding-top: 2px;
 }

@@ -7,8 +7,11 @@ import hashlib
 import base64
 import shutil
 import time
+import uuid
 import json
 import re
+import logging
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime
@@ -22,6 +25,9 @@ from dash import (
 from dash.exceptions import PreventUpdate
 
 from dashboard.engine import AnalyticsEngine, CLASS_COLORS, CLASS_NAMES
+
+logger = logging.getLogger(__name__)
+_engine_lock = threading.Lock()
 
 # =====================================================================
 # Engine initialisation
@@ -42,10 +48,13 @@ is_worker = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
 is_main_file = __name__ == "__main__"
 
 if not is_main_file or is_worker:
-    print("Loading model + QuickDraw data + UMAP …")
-    engine = _engine_tmp.init_demo(active_classes=_saved_classes)
+    logger.info("Loading model + QuickDraw data + UMAP …")
+    # Use the loaded session's classes if available
+    init_classes = _saved_session.get("classes")
+    init_layout = _saved_session.get("embeddings_2d")
+    engine = _engine_tmp.init_demo(active_classes=init_classes, loaded_embeddings_2d=init_layout)
 
-    print(f"Ready — {len(engine.images)} sketches, {engine.n_classes} classes")
+    logger.info("Ready — %d sketches, %d classes", len(engine.images), engine.n_classes)
 
     if _saved_sc:
         n = len(engine.images)
@@ -65,7 +74,7 @@ if not is_main_file or is_worker:
             if cname not in valid_session:
                 valid_session[cname] = engine.default_support.get(cname, [])
         engine.default_support = valid_session
-        print(f"Session restored ({len(valid_session)} classes)")
+        logger.info("Session restored (%d classes)", len(valid_session))
 else:
     if _saved_classes:
         _DATA_DIR = Path(__file__).resolve().parent.parent / 'data' / 'quickdraw' / 'test'
@@ -133,9 +142,6 @@ def _hex_rgba(hex_color: str, alpha: float) -> str:
     return f"rgba({r},{g},{b},{alpha})"
 
 
-def _uirev_hash(sc, temp, sel_q, uirev) -> str:
-    """Stable hash explicitly locked to manual view resets and undo/redo."""
-    return str(uirev)
 
 
 # =====================================================================
@@ -156,7 +162,8 @@ app.layout = html.Div(
                 html.Div(
                     [
                         html.H1("PROTONET EXPLORER",
-                                className="header-title"),
+                                className="header-title",
+                                id="header-main-title"),
                         html.Span("few-shot sketch classifier",
                                   className="header-sub"),
                     ],
@@ -269,8 +276,50 @@ app.layout = html.Div(
                                     className="class-config-panel",
                                     style={"display": "none"},
                                 ),
-                                html.Div(id="class-legend",
-                                         className="class-legend"),
+                                # ── overview tabs: accuracy bars | confusion matrix ──
+                                html.Div(
+                                    [
+                                        html.Div(
+                                            [
+                                                html.Button(
+                                                    "ACCURACY",
+                                                    id="overview-tab-accuracy",
+                                                    className="btn-group-item btn-group-item--active",
+                                                    n_clicks=0,
+                                                ),
+                                                html.Button(
+                                                    "CONFUSION",
+                                                    id="overview-tab-confusion",
+                                                    className="btn-group-item",
+                                                    n_clicks=0,
+                                                ),
+                                            ],
+                                            className="btn-group",
+                                            style={"width": "100%", "marginBottom": "6px"},
+                                        ),
+                                        html.Div(
+                                            id="class-legend",
+                                            className="class-legend",
+                                        ),
+                                        html.Div(
+                                            dcc.Graph(
+                                                id="confusion-graph",
+                                                config={
+                                                    "displaylogo": False,
+                                                    "modeBarButtonsToRemove": [
+                                                        "zoom2d","pan2d","select2d",
+                                                        "lasso2d","zoomIn2d","zoomOut2d",
+                                                        "autoScale2d","resetScale2d",
+                                                    ],
+                                                    "displayModeBar": False,
+                                                },
+                                            ),
+                                            id="confusion-panel",
+                                            style={"display": "none"},
+                                        ),
+                                    ],
+                                    className="overview-container",
+                                ),
                             ],
                             className="sidebar-section",
                         ),
@@ -328,12 +377,90 @@ app.layout = html.Div(
                             className="sidebar-section",
                         ),
 
-                        # detail panel (inspector OR support set)
+                        # persistent detail panels (toggled via display style to prevent graph flashing)
                         html.Div(
                             [
-                                html.Div(id="detail-panel",
-                                         className="detail-panel"),
-                                # draw-panel status elements moved into _render_canvas_tool
+                                html.Div(
+                                    [
+                                        # Moved dummy components to dummy-container to avoid unstyled white boxes
+                                    ],
+                                    id="inspector-panel", 
+                                    className="detail-panel", 
+                                    style={"display": "none"}
+                                ),
+                                html.Div(id="support-panel", className="detail-panel", style={"display": "none"}),
+                                html.Div(
+                                    [
+                                        html.Div(id="candidates-header", className="section-header"),
+                                        dcc.Graph(
+                                            id="candidate-scatter",
+                                            figure=go.Figure(),
+                                            config={"displaylogo": False, "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"]},
+                                            style={"height": "380px", "marginTop": "8px"},
+                                        ),
+                                        html.Div(id="candidate-footer", style={"marginTop": "auto", "borderTop": "1px solid #3a4235", "padding": "8px", "minHeight": "60px"})
+                                    ],
+                                    id="candidates-panel",
+                                    className="detail-panel candidates-panel",
+                                    style={"display": "none", "flexDirection": "column", "height": "460px"}
+                                ),
+                                html.Div(
+                                    [
+                                        html.Div(id="draw-header", className="section-header"),
+                                        html.Div(
+                                            [
+                                                html.Canvas(
+                                                    id="draw-canvas",
+                                                    width=240, height=240,
+                                                    style={"background": "#000000", "border": "1px solid #3a4235", "cursor": "crosshair"}
+                                                ),
+                                                html.Div(id="draw-live-confidence",
+                                                         className="hint-text",
+                                                         style={"textAlign": "center", "marginTop": "6px", "color": "#aaaaaa"}),
+                                            ],
+                                            style={"display": "flex", "flexDirection": "column", "alignItems": "center", "marginTop": "12px"}
+                                        ),
+                                        html.Div(
+                                            [
+                                                html.Button("CLEAR", id="clear-canvas-btn", className="btn-small", n_clicks=0),
+                                                html.Button("UNDO", id="undo-canvas-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
+                                                html.Button("REDO", id="redo-canvas-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
+                                                html.Div(style={"flex": "1"}),
+                                                html.Button("BRUSH", id="brush-tool-btn", className="btn-small btn-accent", n_clicks=0),
+                                                html.Button("ERASER", id="eraser-tool-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
+                                            ],
+                                            className="draw-controls",
+                                            style={"display": "flex", "gap": "6px", "alignItems": "center", "marginTop": "8px"}
+                                        ),
+                                        html.Div(
+                                            [
+                                                dcc.Input(id="new-class-name", type="text", placeholder="Class Name...", autoComplete="off", style={"width": "100%", "marginTop": "8px", "background": "#2a2a2a", "color": "white", "border": "1px solid #444", "padding": "4px", "borderRadius": "4px"}),
+                                                html.Div("0 of 2 drawn", id="new-class-progress", className="hint-text", style={"marginTop": "4px", "color": "#ffaa00", "textAlign": "center"}),
+                                                html.Button("CREATE CLASS", id="create-class-btn", className="btn-accent", style={"width": "100%", "marginTop": "8px", "padding": "6px"}, disabled=True, n_clicks=0),
+                                            ],
+                                            id="new-class-controls",
+                                            style={"display": "none"}
+                                        ),
+                                        html.Div(
+                                            [
+                                                dcc.Dropdown(id={"type": "assign-class-dropdown", "index": "main"}, options=[], searchable=False),
+                                                html.Button(id="stage-draw-btn"),
+                                                html.Button(id="add-query-btn"),
+                                            ],
+                                            id="draw-assign-row", 
+                                            style={"marginTop": "auto"}
+                                        )
+                                    ],
+                                    id="draw-panel",
+                                    className="detail-panel draw-panel",
+                                    style={"display": "none", "flexDirection": "column", "height": "460px", "padding": "8px"}
+                                ),
+                                html.Div(
+                                    [],
+                                    id="import-panel", 
+                                    className="detail-panel", 
+                                    style={"display": "none"}
+                                ),
                             ],
                             className="sidebar-section support-section",
                         ),
@@ -364,11 +491,13 @@ app.layout = html.Div(
         dcc.Store(id="uirev-store",            data=0),
         dcc.Store(id="sidebar-mode-store",     data="support"),
         dcc.Store(id="candidate-delta-store",  data={}),
+        dcc.Store(id="support-delta-store",    data={}),
+        dcc.Store(id="conf-selection-store",   data=None), # [true_class, pred_class]
         dcc.Interval(id="delta-interval", interval=1000, n_intervals=0, disabled=True),
         dcc.Store(id="drawing-strokes-store", data=[]),
         dcc.Store(id="drawing-ghost-store", data=None),
-        dcc.Store(id="draw-interval-active", data=False),
         dcc.Interval(id="draw-interval", interval=600, n_intervals=0, disabled=True),
+        dcc.Store(id="draw-interval-active", data=False),
         dcc.Store(id="new-class-drawings-store", data=[]),
         dcc.Store(id="new-class-name-store", data=""),
         dcc.Store(id="engine-version-store", data=0),
@@ -382,6 +511,34 @@ app.layout = html.Div(
         dcc.Store(id="custom-classes-store", data=_get_custom_classes_from_disk()),
         # tracks selected folder in the import-from-drawings panel
         dcc.Store(id="import-selected-folder-store", data=None),
+        # highlight: written by scatter click OR support/candidate panel click
+        # Patch callback adds ring to UMAP without redrawing
+        dcc.Store(id="highlight-store", data=None),
+        # inspector filter state: persists across panel rebuilds
+        dcc.Store(id="infl-filter-store", data={"top_n": 5, "cls": "all", "sort": "sim"}),
+        # co-activation toggle: which row is expanded (query_idx + support_idx key)
+        dcc.Store(id="coact-open-store", data=None),
+        # tracks which overview tab is active: "accuracy" or "confusion"
+        dcc.Store(id="overview-tab-store", data="accuracy"),
+        # Download handler
+        dcc.Download(id="export-download"),
+        # Hidden dummy container to satisfy Dash callback validation for dynamic components
+        # We only keep the stores here. Interactive components should be in the persistent panels.
+        html.Div(
+            [
+                dcc.Dropdown(id="infl-top-n", style={"display": "none"}, options=[], searchable=False), # preserve if needed
+                # Dummy anchors for pattern-matched callbacks to avoid broken UI in visible panels
+                dcc.Dropdown(id={"type": "infl-why-mode", "index": "dummy"}, options=[], searchable=False, className="infl-filter-drop"),
+                dcc.Dropdown(id={"type": "infl-class-filter", "index": "dummy"}, options=[], searchable=False, className="infl-filter-drop"),
+                dcc.Dropdown(id={"type": "assign-class-dropdown", "index": "dummy"}, options=[], searchable=False),
+                html.Button(id={"type": "clear-sel-btn", "index": "inspector"}),
+                html.Button(id="apply-classes-btn", style={"display": "none"}),
+                html.Button(id="export-support-btn", style={"display": "none"}),
+                html.Button(id="view-wrong-btn", style={"display": "none"}),
+            ],
+            id="dummy-container",
+            style={"display": "none"}
+        ),
     ],
     className="root",
 )
@@ -405,6 +562,59 @@ app.clientside_callback(
     """,
     Output("annotation-relayout-store", "data"),
     Input("scatter", "relayoutData"),
+)
+
+# Reset confusion matrix clickData after each selection to enable toggle-on-reclick
+app.clientside_callback(
+    """
+    function(confSel) {
+        // When selection store changes (set or cleared), reset the graph's clickData
+        // so the 'change' trigger fires even if the same cell is clicked twice.
+        return null;
+    }
+    """,
+    Output("confusion-graph", "clickData"),
+    Input("conf-selection-store", "data"),
+)
+
+# =====================================================================
+# Visibility Toggling — Sidebar Panels
+# =====================================================================
+app.clientside_callback(
+    """
+    function(mode, sel_q) {
+        var inspector = {display: 'none'};
+        var support    = {display: 'none'};
+        var cands     = {display: 'none'};
+        var draw       = {display: 'none'};
+        var imp       = {display: 'none'};
+
+        if (mode === 'candidates') {
+            cands = {display: 'flex'};
+        } else if (mode === 'draw') {
+            draw = {display: 'flex'};
+        } else if (mode === 'import') {
+            imp = {display: 'flex'};
+        } else if (sel_q !== null) {
+            inspector = {display: 'block'};
+        } else {
+            support = {display: 'block'};
+        }
+
+        return [inspector, support, cands, draw, imp];
+    }
+    """,
+    [
+        Output("inspector-panel",  "style"),
+        Output("support-panel",    "style"),
+        Output("candidates-panel", "style"),
+        Output("draw-panel",       "style"),
+        Output("import-panel",     "style"),
+    ],
+    [
+        Input("sidebar-mode-store", "data"),
+        Input("sel-query-store",    "data"),
+    ],
 )
 
 # =====================================================================
@@ -446,9 +656,10 @@ def _mesh_cache_key(sc: dict, temp: float) -> str:
     Input({"type": "assign-class-dropdown", "index": ALL}, "value"),
     Input("engine-version-store", "data"),
     State("sel-query-store", "data"),
+    State("highlight-store", "data"),
     State("master-view-id", "data"),
 )
-def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, active_class_list, _engine_ver, sel_q, uirev):
+def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, active_class_list, _engine_ver, sel_q, hl_idxs, uirev):
     color_map = color_map or {}
     active_class = active_class_list[0] if active_class_list else None
 
@@ -459,16 +670,17 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, active_class_l
         return empty, "No classes", "", []
 
     sfig = _base_fig(title="Embedding Space  (UMAP)",
-                     uirevision=_uirev_hash(sc, temp, sel_q, uirev))
+                     uirevision=str(uirev))
 
     # ── Decision mesh — cached by (sc, temp) so zoom/color/ghost updates
     # don't re-run the 800×800 cdist and PNG encode
     global _mesh_cache
     _mk = _mesh_cache_key(sc, temp)
-    if _mesh_cache["key"] == _mk:
-        cached_mesh = _mesh_cache["result"]
-    else:
-        cached_mesh = None
+    with _engine_lock:
+        if _mesh_cache["key"] == _mk:
+            cached_mesh = _mesh_cache["result"]
+        else:
+            cached_mesh = None
 
     if cached_mesh is None:
         xx, ys, zz_class, zz_alpha = engine.decision_mesh(sc, temp, res=800)
@@ -476,33 +688,35 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, active_class_l
         res_val = zz_class.shape[0]
         img_rgba = np.zeros((res_val, res_val, 4), dtype=np.uint8)
         base_alpha = 115  # ~45% max opacity
-        
+
+        import io, base64
+        from PIL import Image as PILImage
+
         def hex_to_rgb(hx):
             hx = hx.lstrip('#')
             return tuple(int(hx[i:i+2], 16) for i in (0, 2, 4))
-            
-        # Calculate topographical elevation bands
+
+        # Topographic elevation bands driven by softmax confidence
         STEPS = 6
         norm_alpha = (zz_alpha - 1.0/nc) / (1.0 - 1.0/nc + 1e-9)
         norm_alpha = np.clip(norm_alpha, 0, 1) ** 0.8
         zz_band = np.ceil(norm_alpha * STEPS)
-        
-        # Edge detection for contour lines (np.roll shifts the array to compare neighbors)
+
+        # Edge detection for contour lines
         edge_mask = (
-            (zz_band != np.roll(zz_band, 1, axis=0)) |
-            (zz_band != np.roll(zz_band, -1, axis=0)) |
-            (zz_band != np.roll(zz_band, 1, axis=1)) |
-            (zz_band != np.roll(zz_band, -1, axis=1)) |
-            (zz_class != np.roll(zz_class, 1, axis=0)) |
+            (zz_band  != np.roll(zz_band,   1, axis=0)) |
+            (zz_band  != np.roll(zz_band,  -1, axis=0)) |
+            (zz_band  != np.roll(zz_band,   1, axis=1)) |
+            (zz_band  != np.roll(zz_band,  -1, axis=1)) |
+            (zz_class != np.roll(zz_class,  1, axis=0)) |
             (zz_class != np.roll(zz_class, -1, axis=0)) |
-            (zz_class != np.roll(zz_class, 1, axis=1)) |
+            (zz_class != np.roll(zz_class,  1, axis=1)) |
             (zz_class != np.roll(zz_class, -1, axis=1))
         )
-        
-        # Prevent boundary rendering from wrap-around roll
-        edge_mask[0, :] = False
+        # Prevent wrap-around roll artefacts at image borders
+        edge_mask[0, :]  = False
         edge_mask[-1, :] = False
-        edge_mask[:, 0] = False
+        edge_mask[:, 0]  = False
         edge_mask[:, -1] = False
 
         for i in range(nc):
@@ -511,40 +725,35 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, active_class_l
                 r, g, b = hex_to_rgb(col_str)
             except Exception:
                 r, g, b = (128, 128, 128)
-            
+
             mask = (zz_class == i)
-            # Use discrete banded alpha
             alpha_mask = zz_band[mask] / STEPS
-            
-            # Boost opacity heavily on contour edges for solid topographical lines
             final_alpha = alpha_mask * base_alpha
-            edge_boost = np.where(edge_mask[mask], 180, final_alpha)
-            
+            edge_boost  = np.where(edge_mask[mask], 180, final_alpha)
+
             img_rgba[mask, 0] = r
             img_rgba[mask, 1] = g
             img_rgba[mask, 2] = b
             img_rgba[mask, 3] = np.clip(edge_boost, 0, 255).astype(np.uint8)
 
-        # Plotly layout images draw from top-left. Our ys array goes bottom-to-top.
-        # Flip vertically to render properly in Cartesian coordinates.
+        # Plotly layout images draw from top-left; ys goes bottom-to-top — flip.
         img_rgba = img_rgba[::-1, :, :]
-        
-        import io, base64
-        from PIL import Image as PILImage
+
         img_pil = PILImage.fromarray(img_rgba)
-        
         buf = io.BytesIO()
         img_pil.save(buf, format="PNG")
         img_str = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
         cached_mesh = {
             "img_str": img_str,
-            "x0": float(xx[0][0]), "y1": float(ys[-1]),
+            "x0":    float(xx[0][0]),
+            "y1":    float(ys[-1]),
             "sizex": float(xx[0][-1] - xx[0][0]),
-            "sizey": float(ys[-1] - ys[0]),
+            "sizey": float(ys[-1]   - ys[0]),
         }
-        _mesh_cache["key"] = _mk
-        _mesh_cache["result"] = cached_mesh
+        with _engine_lock:
+            _mesh_cache["key"] = _mk
+            _mesh_cache["result"] = cached_mesh
 
     if cached_mesh:
         sfig.add_layout_image(
@@ -696,6 +905,7 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, active_class_l
             opacity=0.95,
         )
 
+
     # ── what-if ghost prototypes ──────────────────────────────────
     whatif_res = None
     if whatif_sc:
@@ -780,7 +990,282 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, active_class_l
             ]
         )
 
+    # ── Persistent Highlight Rings (for cases where full figure rebuilds) ──
+    # This prevents the "momentary highlight" bug.
+    combined_hl = set()
+    if sel_q is not None: combined_hl.add(sel_q)
+    if hl_idxs:
+        if isinstance(hl_idxs, (int, str)):
+            try: combined_hl.add(int(hl_idxs))
+            except: pass
+        else: combined_hl.update([int(i) for i in hl_idxs if i is not None])
+
+    if combined_hl:
+        hx, hy = [], []
+        coords_2d = engine.embeddings_2d
+        for i in list(combined_hl):
+            if 0 <= i < len(coords_2d):
+                hx.append(coords_2d[i, 0])
+                hy.append(coords_2d[i, 1])
+        if hx:
+            sfig.add_trace(go.Scatter(
+                x=hx, y=hy,
+                mode="markers",
+                marker=dict(size=14, color="rgba(0,0,0,0)",
+                            line=dict(width=2, color="#ffffff")),
+                showlegend=False, hoverinfo="skip",
+                uid="highlight-rings",
+            ))
+
     return sfig, legend_items, stat, list(order)
+
+
+# ── 1c. Overview tab toggle ───────────────────────────────────────
+
+@app.callback(
+    Output("overview-tab-store",     "data"),
+    Output("overview-tab-accuracy",  "className"),
+    Output("overview-tab-confusion", "className"),
+    Output("class-legend",           "style"),
+    Output("confusion-panel",        "style"),
+    Output("highlight-store",       "data", allow_duplicate=True),
+    Output("conf-selection-store",  "data", allow_duplicate=True),
+    Input("overview-tab-accuracy",   "n_clicks"),
+    Input("overview-tab-confusion",  "n_clicks"),
+    State("overview-tab-store",      "data"),
+    prevent_initial_call=True,
+)
+def toggle_overview_tab(n_acc, n_conf, current):
+    ctx = callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    triggered = ctx.triggered[0]["prop_id"]
+    tab = "accuracy" if "accuracy" in triggered else "confusion"
+    active   = "btn-group-item btn-group-item--active"
+    inactive = "btn-group-item"
+    acc_cls  = active   if tab == "accuracy"  else inactive
+    conf_cls = active   if tab == "confusion" else inactive
+    acc_style  = {"display": "block"} if tab == "accuracy"  else {"display": "none"}
+    conf_style = {"display": "block"} if tab == "confusion" else {"display": "none"}
+    
+    # If switching to accuracy, clear confusion highlights
+    clean_hl = no_update
+    clean_conf = no_update
+    if tab == "accuracy":
+        clean_hl = None
+        clean_conf = None
+
+    return tab, acc_cls, conf_cls, acc_style, conf_style, clean_hl, clean_conf
+
+
+# 1d. Confusion matrix as Plotly heatmap ───────────────────────
+
+@app.callback(
+    Output("confusion-graph", "figure"),
+    Input("sc-store",           "data"),
+    Input("temp-slider",        "value"),
+    Input("color-map-store",    "data"),
+    Input("engine-version-store", "data"),
+    Input("sel-query-store",    "data"),
+    Input("conf-selection-store", "data"),
+)
+def render_confusion_matrix(sc, temp, color_map, _ev, sel_q, conf_sel):
+    color_map = color_map or {}
+    res   = engine.classify(sc, temp)
+    order = res["order"]
+    if not order:
+        return _base_fig()
+
+    n          = len(order)
+    preds      = res["preds"]
+    true_idx   = res["true_idx"]
+
+    # Build n×n count matrix  (rows = true, cols = predicted)
+    cm = np.zeros((n, n), dtype=int)
+    for ti, pi in zip(true_idx, preds):
+        if 0 <= ti < n and 0 <= pi < n:
+            cm[ti, pi] += 1
+
+    row_totals = cm.sum(axis=1, keepdims=True).clip(min=1)
+    cm_norm    = cm / row_totals   # fraction
+
+    # Highlight selected query's true + predicted class
+    hl_row = hl_col = -1
+    if sel_q is not None:
+        qi = int(sel_q)
+        if qi < len(engine.labels):
+            tc = engine.class_names[engine.labels[qi]]
+            if tc in order:
+                hl_row = order.index(tc)
+            info = engine.query_distances(qi, sc, temp)
+            if info["pred"] in order:
+                hl_col = order.index(info["pred"])
+
+    # Highlight group selection (from conf-selection-store)
+    group_row = group_col = -1
+    if conf_sel and len(conf_sel) == 2:
+        tc, pc = conf_sel
+        if tc in order: group_row = order.index(tc)
+        if pc in order: group_col = order.index(pc)
+
+    # Build custom colour: green on diagonal, red off-diagonal, intensity = fraction
+    # Plotly heatmap only takes a single z matrix so we pass cm_norm and
+    # use a custom colorscale per cell via annotation text + shapes.
+    # Simpler: separate diagonal and off-diagonal into two overlaid heatmaps.
+
+    # Hover text
+    hover = []
+    for i in range(n):
+        row = []
+        for j in range(n):
+            row.append(
+                f"true: {order[i]}<br>pred: {order[j]}<br>"
+                f"count: {cm[i,j]}  ({cm_norm[i,j]:.0%})"
+            )
+        hover.append(row)
+
+    fig = _base_fig()
+    cell_px = max(32, min(48, int(150 / n)))
+    graph_h  = n * cell_px + 100   # more compact label space
+
+    fig.update_layout(
+        height=graph_h,
+        margin=dict(l=48, r=8, t=8, b=72),
+        xaxis=dict(
+            tickvals=list(range(n)),
+            ticktext=[o[:5] for o in order],
+            tickfont=dict(size=9, color=TEXT, family=FONT),
+            tickangle=-45,
+            title=dict(text="predicted", font=dict(size=9, color=TEXT2,
+                       family=FONT), standoff=4),
+            gridcolor="rgba(0,0,0,0)",
+            zeroline=False,
+            side="bottom",
+            constrain="domain",
+        ),
+        yaxis=dict(
+            tickvals=list(range(n)),
+            ticktext=[o[:5] for o in order],
+            tickfont=dict(size=9, color=TEXT, family=FONT),
+            title=dict(text="true", font=dict(size=9, color=TEXT2,
+                       family=FONT), standoff=4),
+            gridcolor="rgba(0,0,0,0)",
+            zeroline=False,
+            autorange="reversed",
+            scaleanchor="x",
+            scaleratio=1,
+            constrain="domain",
+        ),
+        plot_bgcolor=DARK_BG,
+        paper_bgcolor=CARD_BG,
+        showlegend=False,
+    )
+
+    # Single heatmap — standard confusion matrix style
+    # One colorscale, intensity = normalised count per row
+    fig.add_trace(go.Heatmap(
+        z=cm_norm,
+        text=hover,
+        hovertemplate="%{text}<extra></extra>",
+        colorscale=[
+            [0.0,  "#1a1d17"],
+            [0.15, "#0d3b2e"],
+            [0.4,  "#0f6e56"],
+            [0.7,  "#1D9E75"],
+            [1.0,  "#9FE1CB"],
+        ],
+        showscale=True,
+        colorbar=dict(
+            thickness=8,
+            len=0.5,
+            tickfont=dict(size=8, color=TEXT, family=FONT),
+            tickformat=".0%",
+            outlinewidth=0,
+        ),
+        zmin=0, zmax=1,
+    ))
+
+    # Highlight selected query row/col with shapes
+    shapes = []
+    if hl_row >= 0:
+        shapes.append(dict(
+            type="rect",
+            x0=-0.5, x1=n - 0.5,
+            y0=hl_row - 0.5, y1=hl_row + 0.5,
+            line=dict(color=ACCENT, width=1.5),
+            fillcolor="rgba(0,0,0,0)",
+            layer="above",
+        ))
+    if hl_col >= 0:
+        shapes.append(dict(
+            type="rect",
+            x0=hl_col - 0.5, x1=hl_col + 0.5,
+            y0=-0.5, y1=n - 0.5,
+            line=dict(color=ACCENT, width=1.5),
+            fillcolor="rgba(0,0,0,0)",
+            layer="above",
+        ))
+    if group_row >= 0 and group_col >= 0:
+        # Integrated selection border
+        shapes.append(dict(
+            type="rect",
+            x0=group_col - 0.5, x1=group_col + 0.5,
+            y0=group_row - 0.5, y1=group_row + 0.5,
+            line=dict(color="#ffffff", width=2.5),
+            fillcolor="rgba(255,255,255,0.15)",
+            layer="above",
+        ))
+    if shapes:
+        fig.update_layout(shapes=shapes)
+
+    return fig
+
+
+@app.callback(
+    Output("highlight-store",       "data", allow_duplicate=True),
+    Output("conf-selection-store",  "data", allow_duplicate=True),
+    Input("confusion-graph",  "clickData"),
+    State("sc-store",         "data"),
+    State("temp-slider",      "value"),
+    State("conf-selection-store", "data"),
+    prevent_initial_call=True,
+)
+def highlight_confusion_cell(click, sc, temp, current_sel):
+    """Clicking a cell (true, pred) highlights all matching query points.
+    Clicking the same cell again clears the highlight.
+    """
+    if not click or not click.get("points"):
+        raise PreventUpdate
+    pt = click["points"][0]
+    # x is predicted index, y is true index
+    true_idx_hit = pt.get("y")
+    pred_idx_hit = pt.get("x")
+    if true_idx_hit is None or pred_idx_hit is None:
+        raise PreventUpdate
+
+    res = engine.classify(sc, temp)
+    order = res["order"]
+    if true_idx_hit >= len(order) or pred_idx_hit >= len(order):
+        raise PreventUpdate
+        
+    true_class_name = order[true_idx_hit]
+    pred_class_name = order[pred_idx_hit]
+
+    # Toggle logic: if same cell (by name), clear
+    if current_sel and current_sel[0] == true_class_name and current_sel[1] == pred_class_name:
+        return None, None
+
+    true_idx = res["true_idx"]
+    preds = res["preds"]
+    query_idxs = res["query_idxs"]
+
+    # Filter query indices where true_idx matches y and preds matches x
+    highlight_idxs = []
+    for i, (ti, pi) in enumerate(zip(true_idx, preds)):
+        if ti == true_idx_hit and pi == pred_idx_hit:
+            highlight_idxs.append(int(query_idxs[i]))
+
+    return highlight_idxs, [true_class_name, pred_class_name]
 
 
 # ── 1b. Selection ring — lightweight Patch, no full figure rebuild ─
@@ -802,11 +1287,6 @@ def update_selection_ring(sel_q, current_fig):
     # Remove any existing ring traces by rebuilding the data list without them.
     # Patch supports item-level list mutations via p["data"] index assignment.
     # Simpler: append the ring at a known position and overwrite it.
-    if current_fig is None:
-        raise PreventUpdate
-
-    # Strip old ring traces (identified by hoverinfo="skip" + size=16 marker)
-    # We use a Patch list-append approach: always append, and keep only the last.
     # Clearing old rings requires knowing their index; instead we embed a uid.
     # Cleanest approach: use allow_duplicate and rebuild just the ring element
     # by comparing existing traces. Since Patch doesn't support list filtering,
@@ -833,6 +1313,40 @@ def update_selection_ring(sel_q, current_fig):
         filtered = [t for t in existing if t.get("uid") != _SEL_TRACE_ID]
         if len(filtered) == len(existing):
             raise PreventUpdate  # no ring was present, nothing to do
+        p["data"] = filtered
+    return p
+
+
+_SUP_TRACE_ID = "support-ring"
+
+
+@app.callback(
+    Output("scatter", "figure", allow_duplicate=True),
+    Input("sel-support-store", "data"),
+    State("scatter", "figure"),
+    prevent_initial_call=True,
+)
+def update_support_ring(sel_sup, current_fig):
+    """Patch a ring onto a support sketch when selected in the support panel."""
+    if current_fig is None:
+        raise PreventUpdate
+    p = Patch()
+    existing = current_fig.get("data", [])
+    filtered = [t for t in existing if t.get("uid") != _SUP_TRACE_ID]
+    if sel_sup is not None and isinstance(sel_sup, int) and sel_sup < len(engine.embeddings_2d):
+        ring = go.Scatter(
+            x=[engine.embeddings_2d[sel_sup, 0]],
+            y=[engine.embeddings_2d[sel_sup, 1]],
+            mode="markers",
+            marker=dict(size=16, color="rgba(0,0,0,0)",
+                        line=dict(width=2.5, color=ACCENT)),
+            showlegend=False, hoverinfo="skip",
+            uid=_SUP_TRACE_ID,
+        )
+        p["data"] = filtered + [ring]
+    else:
+        if len(filtered) == len(existing):
+            raise PreventUpdate
         p["data"] = filtered
     return p
 
@@ -897,32 +1411,55 @@ def handle_annotation_drag(relayout, sc, undo_stack, order):
     Output("sel-support-store", "data", allow_duplicate=True),
     Output("class-selector",    "value", allow_duplicate=True),
     Output("whatif-store",      "data", allow_duplicate=True),
+    Output("highlight-store",   "data", allow_duplicate=True),
+    Output("conf-selection-store", "data", allow_duplicate=True),
     Input("scatter", "clickData"),
     State("sc-store", "data"),
+    State("sidebar-mode-store", "data"),
     prevent_initial_call=True,
 )
-def scatter_click(click, sc):
+def scatter_click(click, sc, mode):
     if not click or not click.get("points"):
-        raise PreventUpdate
+        return None, None, no_update, None, None, None
     pt = click["points"][0]
     cd = pt.get("customdata")
     if cd is None:
-        return None, None, no_update, None
-    # Support diamond: customdata = [idx, "support"]
-    if isinstance(cd, list) and len(cd) == 2 and cd[1] == "support":
-        idx = int(cd[0])
-        cname = next(
-            (c for c, items in sc.items()
-             if any(it["idx"] == idx for it in items)),
-            no_update,
-        )
-        return None, idx, cname, None
-    # Query point: customdata = idx (int or single-element list)
-    idx = int(cd) if not isinstance(cd, list) else (int(cd[0]) if cd else None)
-    if idx is not None:
-        cname = engine.class_names[engine.labels[idx]]
-        return idx, None, cname, None
-    return None, None, no_update, None
+        return None, None, no_update, no_update, no_update, no_update
+
+    idx = None
+    is_support_diamond = False
+
+    try:
+        # Support diamond: customdata = [idx, "support"]
+        if isinstance(cd, list) and len(cd) == 2 and cd[1] == "support":
+            idx = int(cd[0])
+            is_support_diamond = True
+        else:
+            # Query point: customdata = idx (int or single-element list)
+            if isinstance(cd, list):
+                idx = int(cd[0]) if cd else None
+            else:
+                idx = int(cd)
+    except (ValueError, TypeError, IndexError):
+        return no_update, no_update, no_update, no_update, no_update, no_update
+
+    if idx is None:
+        return None, None, no_update, no_update, no_update, no_update
+
+    # Safety check for image indexing
+    if not (0 <= idx < len(engine.labels)):
+        return no_update, no_update, no_update, no_update, no_update, no_update
+
+    cname = engine.class_names[engine.labels[idx]]
+
+    if mode == "candidates":
+        # Candidate mode: Don't open inspector. Just highlight.
+        return None, None, no_update, no_update, [idx], no_update
+
+    if is_support_diamond:
+        return None, idx, cname, no_update, no_update, no_update
+    else:
+        return idx, None, cname, no_update, no_update, no_update
 
 
 # ── 3b. Clear selection button ──────────────────────────────────
@@ -931,13 +1468,15 @@ def scatter_click(click, sc):
 @app.callback(
     Output("sel-query-store", "data", allow_duplicate=True),
     Output("sel-support-store", "data", allow_duplicate=True),
-    Input("clear-sel-btn", "n_clicks"),
+    Output("highlight-store", "data", allow_duplicate=True),
+    Output("conf-selection-store", "data", allow_duplicate=True),
+    Input({"type": "clear-sel-btn", "index": ALL}, "n_clicks"),
     prevent_initial_call=True,
 )
-def clear_selection(n):
-    if not n:
+def clear_selection(clicks):
+    if not clicks or not any(v for v in clicks if v):
         raise PreventUpdate
-    return None, None
+    return None, None, None, None
 
 
 def _restore_snapshot(snapshot: dict, current_sel_class: str) -> tuple:
@@ -957,11 +1496,29 @@ def _restore_snapshot(snapshot: dict, current_sel_class: str) -> tuple:
 
     idx_map: dict = {}
     readded: set = set()
-    if target_engine_classes and set(target_engine_classes) != set(engine.class_names):
-        idx_map, readded = engine.sync_to_classes(target_engine_classes)
 
-    if "excluded" in snapshot:
-        engine.excluded_indices = set(snapshot["excluded"])
+    # Restore any soft-deleted custom class folders from .trash/ before
+    # sync_to_classes tries to load them — otherwise add_class finds no files.
+    _trash_dir = Path(__file__).resolve().parent.parent / '.trash'
+    _data_dir  = Path(__file__).resolve().parent.parent / 'data' / 'quickdraw' / 'test'
+    if target_engine_classes and _trash_dir.exists():
+        for name in target_engine_classes:
+            src = _trash_dir / name
+            dst = _data_dir / name
+            if src.exists() and not dst.exists():
+                try:
+                    shutil.move(str(src), str(dst))
+                    logger.info("Restored class folder from trash: %s", name)
+                except Exception as e:
+                    logger.error("Failed to restore %s from trash: %s", name, e)
+
+    with _engine_lock:
+        if target_engine_classes and set(target_engine_classes) != set(engine.class_names):
+            idx_map, readded = engine.sync_to_classes(target_engine_classes)
+
+        if "excluded" in snapshot:
+            engine.excluded_indices = set(snapshot["excluded"])
+            engine.save_excluded()
 
     raw_sc = snapshot.get("sc", {})
 
@@ -1018,6 +1575,7 @@ def _restore_snapshot(snapshot: dict, current_sel_class: str) -> tuple:
     Output("master-view-id",        "data",    allow_duplicate=True),
     Output("class-selector",        "options", allow_duplicate=True),
     Output("class-selector",        "value",   allow_duplicate=True),
+    Output("save-indicator",        "children", allow_duplicate=True),
     Input("undo-btn", "n_clicks"),
     State("sc-store",              "data"),
     State("active-classes-store",  "data"),
@@ -1058,6 +1616,7 @@ def handle_undo(n_clicks, sc, classes, colors, undo_stack, redo_stack, view_id, 
         (view_id or 0) + 1,
         options,
         new_sel,
+        "● UNSAVED"
     )
 
 
@@ -1074,6 +1633,7 @@ def handle_undo(n_clicks, sc, classes, colors, undo_stack, redo_stack, view_id, 
     Output("master-view-id",        "data",    allow_duplicate=True),
     Output("class-selector",        "options", allow_duplicate=True),
     Output("class-selector",        "value",   allow_duplicate=True),
+    Output("save-indicator",        "children", allow_duplicate=True),
     Input("redo-btn", "n_clicks"),
     State("sc-store",              "data"),
     State("active-classes-store",  "data"),
@@ -1115,6 +1675,7 @@ def handle_redo(n_clicks, sc, classes, colors, undo_stack, redo_stack, view_id, 
         (view_id or 0) + 1,
         options,
         new_sel,
+        "● UNSAVED"
     )
 
 
@@ -1145,8 +1706,51 @@ def update_history_ui(undo_stack):
 # ── 7. Detail panel (inspector OR support set) ───────────────────
 
 
+def render_detail_panel_content(sel_q, sc, temp, sel_class, sel_sup,
+                                whatif_sc, pending_rm, sidebar_mode, infl_filter,
+                                sup_deltas,
+                                saved_class_name, import_folder, active_classes):
+    """Update children of each detail panel container independently."""
+    # 1. Inspector
+    inspector_children = no_update
+    if sel_q is not None:
+        inspector_children = _render_inspector(sel_q, sc, temp, whatif_sc, infl_filter or {})
+
+    # 2. Support
+    support_children = _render_support(sel_class, sc, sel_sup, temp, whatif_sc, pending_rm, sidebar_mode, sup_deltas)
+
+    # 3. Candidates (Header/Footer only — graph is persistent)
+    cand_header, cand_footer = [], []
+    if sidebar_mode == "candidates":
+        cand_header, cand_footer = _render_candidates_parts(sel_class, sc, temp, whatif_sc)
+
+    # 4. Draw (Surgical updates to persistent panel)
+    draw_header, draw_nc_style, draw_nc_prog, draw_create_dis, draw_assign_row, draw_add_q_style = [no_update]*6
+    if sidebar_mode == "draw":
+        draw_header, draw_nc_style, draw_nc_prog, draw_create_dis, draw_assign_row, draw_add_q_style = _render_canvas_tool_parts(sel_class, sc, whatif_sc, saved_class_name)
+
+    # 5. Import
+    import_children = no_update
+    if sidebar_mode == "import":
+        import_children = _render_import_panel(import_folder, active_classes)
+
+    return (inspector_children, support_children, cand_header, cand_footer,
+            draw_header, draw_nc_style, draw_nc_prog, draw_create_dis, draw_assign_row, draw_add_q_style,
+            import_children)
+
+
 @app.callback(
-    Output("detail-panel", "children"),
+    Output("inspector-panel",  "children"),
+    Output("support-panel",    "children"),
+    Output("candidates-header", "children"),
+    Output("candidate-footer", "children"),
+    Output("draw-header",      "children"),
+    Output("new-class-controls", "style",   allow_duplicate=True),
+    Output("new-class-progress", "children", allow_duplicate=True),
+    Output("create-class-btn",   "disabled", allow_duplicate=True),
+    Output("draw-assign-row",    "children"),
+    Output("add-query-btn",      "style",    allow_duplicate=True),
+    Output("import-panel",       "children"),
     Input("sel-query-store",      "data"),
     Input("sc-store",             "data"),
     Input("temp-slider",          "value"),
@@ -1155,34 +1759,38 @@ def update_history_ui(undo_stack):
     Input("whatif-store",         "data"),
     Input("pending-remove-store", "data"),
     Input("sidebar-mode-store", "data"),
+    Input("infl-filter-store",    "data"),
+    Input("support-delta-store",  "data"),
     State("new-class-name-store", "data"),
     State("import-selected-folder-store", "data"),
     State("active-classes-store", "data"),
+    prevent_initial_call='initial_duplicate',
 )
-def render_detail_panel(sel_q, sc, temp, sel_class, sel_sup,
-                        whatif_sc, pending_rm, sidebar_mode, saved_class_name,
-                        import_folder, active_classes):
-    """Show inspector or support set."""
-    # Don't rebuild the canvas when sc-store or whatif-store update while the
-    # draw panel is open — that would wipe the canvas and reset controls.
+def render_detail_panels_callback(sel_q, sc, temp, sel_class, sel_sup,
+                                  whatif_sc, pending_rm, sidebar_mode, infl_filter,
+                                  sup_deltas,
+                                  saved_class_name, import_folder, active_classes):
+    # Don't rebuild while drawing (except for certain safety-gated updates)
     if sidebar_mode == "draw":
         triggered_props = {t["prop_id"] for t in callback_context.triggered}
         draw_safe = {"sc-store.data", "whatif-store.data", "engine-version-store.data"}
         if triggered_props and triggered_props.issubset(draw_safe):
             raise PreventUpdate
 
-    if sel_q is not None:
-        return _render_inspector(sel_q, sc, temp, whatif_sc)
-    if sidebar_mode == "candidates":
-        return _render_candidates(sel_class, sc, temp, whatif_sc)
-    elif sidebar_mode == "draw":
-        return _render_canvas_tool(sel_class, sc, whatif_sc, saved_class_name)
-    elif sidebar_mode == "import":
-        return _render_import_panel(import_folder, active_classes)
-    return _render_support(sel_class, sc, sel_sup, temp, whatif_sc, pending_rm, sidebar_mode)
+    return render_detail_panel_content(
+        sel_q, sc, temp, sel_class, sel_sup,
+        whatif_sc, pending_rm, sidebar_mode, infl_filter,
+        sup_deltas,
+        saved_class_name, import_folder, active_classes
+    )
 
 
-def _render_inspector(sel_q, sc, temp, whatif_sc=None):
+def _render_inspector(sel_q, sc, temp, whatif_sc=None, infl_filter=None):
+    infl_filter = infl_filter or {}
+    # Fixed to top 5 as per user request
+    top_n = 5
+    cls_filter = infl_filter.get("cls", "all")
+    why_mode = infl_filter.get("mode", "all")
     idx = int(sel_q)
     true_class = engine.class_names[engine.labels[idx]]
     info = engine.query_distances(idx, sc, temp)
@@ -1199,7 +1807,7 @@ def _render_inspector(sel_q, sc, temp, whatif_sc=None):
         [
             html.Label("INSPECTOR", className="ctrl-label"),
             html.Button(
-                "✕ CLOSE", id="clear-sel-btn",
+                "✕ CLOSE", id={"type": "clear-sel-btn", "index": "inspector"},
                 className="btn-small", n_clicks=0,
             ),
         ],
@@ -1265,126 +1873,272 @@ def _render_inspector(sel_q, sc, temp, whatif_sc=None):
                 )
             )
 
-    # ── GLOBAL 512D INFLUENCERS section ─────────────────────────────────────────
-    # Evaluates the Top 5 High-Dimensional neighbors dragging this point
-    # across ALL classes dynamically to explain multi-class probability splits.
-    influencers = []
+    # ── NEAREST SUPPORT SKETCHES ─────────────────────────────────────────
+    # Shows sketch-level Euclidean distance alongside class prototype distance.
+    # These are two distinct signals: dist ranks individual sketches,
+    # proto dist determines the actual prediction.
     query_hd = engine.embeddings_hd[idx]
 
-    sims = []
+    # Collect all (dist, sketch_idx, class_name, class_color, proto_dist)
+    # compute_prototypes is hoisted out of the loops — invariant across iterations.
+    p2d, phd, order = engine.compute_prototypes(sc)
+
+    dists = []
     for cname, items in sc.items():
-        if not items: continue
+        if not items:
+            continue
         c_ci = engine.class_names.index(cname) if cname in engine.class_names else 0
         c_col = CLASS_COLORS[c_ci % len(CLASS_COLORS)]
-        
+        proto_dist = None
+        if order and cname in order:
+            pi = order.index(cname)
+            proto_dist = float(np.sqrt(((phd[pi] - query_hd) ** 2).sum()))
         for it in items:
             s_hd = engine.embeddings_hd[it["idx"]]
-            norm_q = np.linalg.norm(query_hd)
-            norm_s = np.linalg.norm(s_hd)
-            if norm_q > 1e-9 and norm_s > 1e-9:
-                cos = float(np.dot(query_hd, s_hd) / (norm_q * norm_s))
-            else:
-                cos = 0.0
-            sims.append((cos, it["idx"], cname, c_col))
+            dist = float(np.sqrt(((query_hd - s_hd) ** 2).sum()))
+            dists.append((dist, it["idx"], cname, c_col, proto_dist))
 
-    # Top 3 most similar globally (restricted to 3 to keep UI clean with heatmaps)
-    sims.sort(key=lambda x: x[0], reverse=True)
-    top_items = sims[:3]
+    # Always sort sketches by dist within their class
+    dists.sort(key=lambda x: x[0])
+
+    # Apply mode filter (correct / wrong / all)
+    filtered_dists = []
+    for s in dists:
+        s_cname = s[2]
+        s_is_correct = (s_cname == true_class)
+        if cls_filter != "all" and s_cname != cls_filter:
+            continue
+        if why_mode == "correct" and not s_is_correct:
+            continue
+        if why_mode == "wrong" and s_is_correct:
+            continue
+        filtered_dists.append(s)
+
+    # Winner prototype — lowest proto_dist
+    proto_dists_by_class = {}
+    for _, _, cname, _, pd in filtered_dists:
+        if pd is not None and cname not in proto_dists_by_class:
+            proto_dists_by_class[cname] = pd
+    winner_class = min(proto_dists_by_class, key=proto_dists_by_class.get) if proto_dists_by_class else None
+
+    # Filter Row
+    filter_row = html.Div(
+        [
+            dcc.Dropdown(
+                id={"type": "infl-why-mode", "index": "active"},
+                options=[{"label": "all sketches", "value": "all"},
+                         {"label": "correct class only", "value": "correct"},
+                         {"label": "wrong class only", "value": "wrong"}],
+                value=why_mode,
+                clearable=False,
+                className="infl-filter-drop",
+                style={"flex": "1"}
+            ),
+            dcc.Dropdown(
+                id={"type": "infl-class-filter", "index": "active"},
+                options=[{"label": "all classes", "value": "all"}] +
+                        [{"label": c, "value": c} for c in engine.class_names],
+                value=cls_filter,
+                clearable=False,
+                className="infl-filter-drop",
+                style={"flex": "1.2"}
+            ),
+        ],
+        className="infl-filter-row",
+        style={"display": "flex", "gap": "6px", "marginBottom": "12px", "padding": "0 4px"}
+    )
 
     why_rows = []
-    for cos, s_idx, s_cname, s_col in top_items:
-        bar_w = f"{max(0, cos) * 100:.0f}%"
-        
-        # Geometrical Co-Activation Match Rendering
-        try:
-            hm_q, hm_s = engine.get_co_activation_images(idx, s_idx, size=40)
-        except Exception:
-            hm_q, hm_s = "", ""
-            
-        why_rows.append(
-            html.Div(
+
+    if cls_filter == "all":
+        # ── Grouped view: one header per class, sorted by proto_dist ──────
+        # Group sketches by class, preserving within-class dist order
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for entry in filtered_dists:
+            groups[entry[2]].append(entry)
+
+        # Sort class groups by proto_dist (winner first), cap sketches per group
+        _SKETCHES_PER_CLASS = 3
+        sorted_classes = sorted(
+            groups.keys(),
+            key=lambda c: proto_dists_by_class.get(c, float("inf"))
+        )
+        for s_cname in sorted_classes:
+            group = groups[s_cname][:_SKETCHES_PER_CLASS]
+            s_col = group[0][3]
+            pd = proto_dists_by_class.get(s_cname)
+            pd_text = f"{pd:.1f}" if pd is not None else "—"
+            is_winner = (s_cname == winner_class)
+
+            # Build sketch cards for this class
+            sketch_cards = []
+            for dist, s_idx, _, _, _ in group:
+                coact_key = f"{idx}_{s_idx}"
+                try:
+                    hm_q, hm_s = engine.get_co_activation_images(idx, s_idx, size=48)
+                except Exception:
+                    hm_q, hm_s = "", ""
+                coact_panel = html.Div(
+                    [
+                        html.Img(src=hm_q,  className="coact-img"),
+                        html.Span("↔", className="coact-sep"),
+                        html.Img(src=hm_s, className="coact-img",
+                                 style={"borderColor": s_col}),
+                    ],
+                    className="coact-panel",
+                    id={"type": "coact-panel", "key": coact_key},
+                ) if hm_q else None
+
+                sketch_cards.append(html.Div(
+                    [
+                        html.Div(
+                            [
+                                html.Img(
+                                    src=engine.image_to_base64(s_idx, size=48),
+                                    className="why-thumb",
+                                    id={"type": "infl-thumb", "idx": s_idx},
+                                    title=f"#{s_idx} — click to highlight in UMAP",
+                                ),
+                                html.Div(
+                                    [
+                                        html.Span("DIST ", className="infl-metric-label"),
+                                        html.Span(f"{dist:.1f}", className="infl-metric-val",
+                                                  style={"fontSize": "13px"}),
+                                    ],
+                                    className="infl-card-body",
+                                    style={"justifyContent": "center"},
+                                ),
+                            ],
+                            className="infl-card-top",
+                        ),
+                        html.Div(
+                            html.Div(
+                                className="infl-sim-bar-fill",
+                                style={"width": f"{max(0, 100 - dist * 4):.0f}%",
+                                       "background": s_col},
+                            ),
+                            className="infl-sim-bar-track",
+                        ),
+                        coact_panel if coact_panel else html.Div(),
+                    ],
+                    className="infl-row",
+                    style={"--cls-col": s_col},
+                ))
+
+            # <details>/<summary> collapsible section — winner starts open
+            why_rows.append(html.Details(
+                [
+                    html.Summary(
+                        [
+                            html.Span(
+                                s_cname,
+                                className="cls-group-name",
+                                style={"color": s_col},
+                            ),
+                            html.Span(
+                                f"proto dist {pd_text}",
+                                className="cls-group-proto",
+                                style={"color": OK_COL if is_winner else TEXT2,
+                                       "fontWeight": "700" if is_winner else "400"},
+                            ),
+                            html.Span(
+                                "· predicted" if is_winner else "",
+                                className="cls-group-badge",
+                            ),
+                        ],
+                        className="cls-group-summary",
+                    ),
+                    html.Div(sketch_cards, className="cls-group-body"),
+                ],
+                className="cls-group",
+                open=is_winner,  # winner starts expanded, rest collapsed
+            ))
+
+    else:
+        # ── Per-class flat view: sorted by dist, dist is primary ──────────
+        for entry in filtered_dists[:top_n]:
+            dist, s_idx, s_cname, s_col, proto_dist = entry
+            coact_key = f"{idx}_{s_idx}"
+            try:
+                hm_q, hm_s = engine.get_co_activation_images(idx, s_idx, size=48)
+            except Exception:
+                hm_q, hm_s = "", ""
+            coact_panel = html.Div(
+                [
+                    html.Img(src=hm_q,  className="coact-img"),
+                    html.Span("↔", className="coact-sep"),
+                    html.Img(src=hm_s, className="coact-img",
+                             style={"borderColor": s_col}),
+                ],
+                className="coact-panel",
+                id={"type": "coact-panel", "key": coact_key},
+            ) if hm_q else None
+
+            proto_text = f"{proto_dist:.1f}" if proto_dist is not None else "—"
+
+            why_rows.append(html.Div(
                 [
                     html.Div(
                         [
                             html.Img(
-                                src=engine.image_to_base64(s_idx, size=32),
+                                src=engine.image_to_base64(s_idx, size=48),
                                 className="why-thumb",
-                                title=f"{s_cname} support #{s_idx}",
+                                id={"type": "infl-thumb", "idx": s_idx},
+                                title=f"#{s_idx} — click to highlight in UMAP",
                             ),
                             html.Div(
                                 [
                                     html.Div(
-                                        html.Div(
-                                            className="why-bar-fill",
-                                            style={"width": bar_w,
-                                                   "background": s_col},
-                                        ),
-                                        className="why-bar",
-                                        title=f"cos sim: {cos:.3f}",
-                                    ),
-                                    html.Span(
-                                        f"{cos:.2f}",
-                                        className="why-sim",
+                                        [
+                                            html.Span("DIST ", className="infl-metric-label"),
+                                            html.Span(f"{dist:.1f}", className="infl-metric-val",
+                                                      style={"fontSize": "13px"}),
+                                            html.Span(" | PROTO DIST ", className="infl-metric-label"),
+                                            html.Span(proto_text, className="infl-metric-val",
+                                                      style={"opacity": "0.55", "fontSize": "10px"}),
+                                        ],
+                                        className="infl-metrics-line",
                                     ),
                                 ],
-                                className="why-bar-col",
-                            ),
-                            html.Button(
-                                f"#{s_idx}",
-                                id={"type": "view-wrong-btn",
-                                    "idx": s_idx,
-                                    "cls": s_cname},
-                                className="btn-small why-view-btn",
-                                n_clicks=0,
-                                title=f"go to {s_cname} #{s_idx}",
+                                className="infl-card-body",
                             ),
                         ],
-                        style={"display": "flex", "alignItems": "center", "gap": "6px", "width": "100%"}
+                        className="infl-card-top",
                     ),
-                    # Co-Activation Visualization Dual Row
                     html.Div(
-                        [
-                            html.Div(
-                                [
-                                    html.Span("Query Match", style={"fontSize": "8px", "color": "#888", "marginBottom": "2px"}),
-                                    html.Img(src=hm_q, style={"width": "40px", "height": "40px", "borderRadius": "4px", "border": "1px solid #444"})
-                                ],
-                                style={"display": "flex", "flexDirection": "column", "alignItems": "center"}
-                            ),
-                            html.Span("↔", style={"color": s_col, "fontSize": "16px", "fontWeight": "bold", "margin": "0 10px", "opacity": "0.8"}),
-                            html.Div(
-                                [
-                                    html.Span("Support Match", style={"fontSize": "8px", "color": "#888", "marginBottom": "2px"}),
-                                    html.Img(src=hm_s, style={"width": "40px", "height": "40px", "borderRadius": "4px", "border": f"1px solid {s_col}"})
-                                ],
-                                style={"display": "flex", "flexDirection": "column", "alignItems": "center"}
-                            )
-                        ],
-                        style={"display": "flex", "justifyContent": "center", "alignItems": "center", "width": "100%", "marginTop": "6px", "backgroundColor": "rgba(0,0,0,0.15)", "padding": "6px", "borderRadius": "6px"}
-                    ) if hm_q else None
+                        html.Div(
+                            className="infl-sim-bar-fill",
+                            style={"width": f"{max(0, 100 - dist * 4):.0f}%",
+                                   "background": s_col},
+                        ),
+                        className="infl-sim-bar-track",
+                    ),
+                    coact_panel if coact_panel else html.Div(),
                 ],
-                className="why-row",
-                style={"display": "flex", "flexDirection": "column", "marginBottom": "10px", "borderBottom": "1px solid #1a1a1a", "paddingBottom": "8px"}
-            )
-        )
+                className="infl-row",
+                style={"--cls-col": s_col},
+            ))
 
     why_wrong = [
         html.Div(
             [
                 html.Div(
                     [
+                        html.Span("NEAREST SUPPORT SKETCHES", className="why-header"),
                         html.Span(
-                            "TOP 512D INFLUENCERS",
-                            className="why-header",
-                        ),
-                        html.Span(
-                            "support cos sim →",
+                            "grouped by class · sorted by proto dist" if cls_filter == "all" else "sorted by sketch dist to query",
                             className="why-sub",
+                            title="all-classes: classes ranked by prototype distance (what the model uses); "
+                                  "per-class: individual sketches ranked by distance to query"
+                                  if cls_filter == "all" else
+                                  "sketches within this class ranked by closeness to the query",
                         ),
                     ],
                     className="why-title-row",
                 ),
-                html.Div(why_rows, className="why-list"),
+                filter_row,
+                html.Div(why_rows, className="why-list", id="infl-list"),
             ],
             className="why-section",
         )
@@ -1418,14 +2172,14 @@ def _render_inspector(sel_q, sc, temp, whatif_sc=None):
                 ),
                 html.Button(
                     "✓",
-                    id="confirm-add-btn",
+                    id={"type": "confirm-add-btn", "index": "inspector"},
                     className="inline-confirm",
                     n_clicks=0,
                     title="Confirm add",
                 ),
                 html.Button(
                     "✕",
-                    id="cancel-add-btn",
+                    id={"type": "cancel-add-btn", "index": "inspector"},
                     className="inline-cancel",
                     n_clicks=0,
                     title="Cancel",
@@ -1465,23 +2219,20 @@ def _render_inspector(sel_q, sc, temp, whatif_sc=None):
     )
 
 
-def _render_candidates(sel_class, sc, temp, whatif_sc=None):
+def _render_candidates_parts(sel_class, sc, temp, whatif_sc=None):
     cands = engine.class_images_pool(sel_class, sc)
-    header = html.Div(
-        [
-            html.Button(
-                "← BACK",
-                id={"type": "sidebar-nav", "id": "support"},
-                className="btn-small",
-                style={"marginRight": "8px"},
-                n_clicks=0,
-            ),
-            html.Label(f"{sel_class.upper()} GRAPH SUPPORT", className="ctrl-label"),
-        ],
-        className="section-header",
-    )
+    header = [
+        html.Button(
+            "← BACK",
+            id={"type": "sidebar-nav", "id": "back-to-support"},
+            className="btn-small",
+            style={"marginRight": "8px"},
+            n_clicks=0,
+        ),
+        html.Label(f"{sel_class.upper()} GRAPH SUPPORT", className="ctrl-label"),
+    ]
     if not cands:
-        return html.Div([header, html.Div("No images found.", className="hint-text")])
+        return header, [html.Div("No images found.", className="hint-text")]
 
     sc_idxs = {it["idx"] for it in sc.get(sel_class, [])}
     whatif_sc = whatif_sc or sc
@@ -1509,73 +2260,31 @@ def _render_candidates(sel_class, sc, temp, whatif_sc=None):
     else:
         footer_content = [html.Div("Click points to toggle support selection.", className="hint-text")]
 
-    footer = html.Div(
-        footer_content,
-        id="candidate-footer",
-        style={"marginTop": "auto", "borderTop": "1px solid #3a4235", "padding": "8px", "minHeight": "60px"}
-    )
-
-    return html.Div(
-        [
-            header,
-            dcc.Graph(
-                id="candidate-scatter",
-                config={"displaylogo": False, "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d"]},
-                style={"height": "380px", "marginTop": "8px"},
-            ),
-            footer
-        ],
-        className="candidates-panel",
-        style={"display": "flex", "flexDirection": "column", "height": "460px"}
-    )
+    return header, footer_content
 
 
-def _render_canvas_tool(sel_class, sc, whatif_sc=None, saved_class_name=""):
+def _render_canvas_tool_parts(sel_class, sc, whatif_sc=None, saved_class_name=""):
     use_sc = whatif_sc if whatif_sc else sc
-    header = html.Div(
-        [
-            html.Button(
-                "← BACK",
-                id={"type": "sidebar-nav", "id": "support"},
-                className="btn-small",
-                style={"marginRight": "8px"},
-                n_clicks=0,
-            ),
-            html.Label("DRAW SKETCH", className="ctrl-label"),
-        ],
-        className="section-header",
-    )
+    header = [
+        html.Button(
+            "← BACK",
+            id={"type": "sidebar-nav", "id": "back-to-support"},
+            className="btn-small",
+            style={"marginRight": "8px"},
+            n_clicks=0,
+        ),
+        html.Label("DRAW SKETCH", className="ctrl-label"),
+    ]
     
-    canvas_container = html.Div(
-        [
-            html.Canvas(
-                id="draw-canvas",
-                width=240, height=240,
-                style={"background": "#000000", "border": "1px solid #3a4235", "cursor": "crosshair"}
-            ),
-            html.Div(id="draw-live-confidence",
-                     className="hint-text",
-                     style={"textAlign": "center", "marginTop": "6px", "color": "#aaaaaa"}),
-        ],
-        style={"display": "flex", "flexDirection": "column", "alignItems": "center", "marginTop": "12px"}
-    )
+    # New class mode logic (dummy version or based on some store state)
+    is_create_new = (sel_class == "CREATE_NEW")
+    nc_style = {"display": "block"} if is_create_new else {"display": "none"}
     
-    controls = html.Div([
-        html.Button("CLEAR", id="clear-canvas-btn", className="btn-small", n_clicks=0),
-        html.Button("UNDO", id="undo-canvas-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
-        html.Button("REDO", id="redo-canvas-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
-        html.Div(style={"flex": "1"}),
-        html.Button("BRUSH", id="brush-tool-btn", className="btn-small btn-accent", n_clicks=0),
-        html.Button("ERASER", id="eraser-tool-btn", className="btn-small", n_clicks=0, style={"marginLeft": "4px"}),
-    ], style={"display": "flex", "gap": "6px", "alignItems": "center", "marginTop": "8px"})
-    
-    new_class_controls = html.Div([
-        dcc.Input(id="new-class-name", value=saved_class_name, placeholder="Enter class name...", debounce=True, style={"width": "100%", "marginTop": "8px", "background": "#2a2a2a", "color": "white", "border": "1px solid #444", "padding": "4px", "borderRadius": "4px"}),
-        html.Div("0 of 2 drawn", id="new-class-progress", className="hint-text", style={"marginTop": "4px", "color": "#ffaa00", "textAlign": "center"}),
-        html.Button("CREATE CLASS", id="create-class-btn", className="btn-accent", style={"width": "100%", "marginTop": "8px", "padding": "6px"}, disabled=True, n_clicks=0),
-    ], id="new-class-controls", style={"display": "none"})
+    # These might need more logic from a store, but for now we'll keep them simple
+    nc_progress = "0 of 2 drawn"
+    create_disabled = True
 
-    assign_row = html.Div([
+    assign_row = [
         html.Label("Assign to:", className="ctrl-label", style={"marginTop": "12px"}),
         dcc.Dropdown(
             id={"type": "assign-class-dropdown", "index": "main"},
@@ -1584,23 +2293,11 @@ def _render_canvas_tool(sel_class, sc, whatif_sc=None, saved_class_name=""):
             className="class-dropdown",
             clearable=False
         ),
-        new_class_controls,
-        html.Button("STAGE ADD", id="stage-draw-btn", className="btn-accent", style={"width": "100%", "marginTop": "12px"}, n_clicks=0),
-        html.Button(
-            "ADD TO DATASET",
-            id="add-query-btn",
-            className="btn-small",
-            style={"width": "100%", "marginTop": "6px", "display": "none" if sel_class == "CREATE_NEW" else "block"},
-            n_clicks=0,
-            title="Add this drawing as a query/test point (not support)"
-        ),
-    ], style={"marginTop": "auto"})
-
-    return html.Div(
-        [header, canvas_container, controls, assign_row],
-        className="draw-panel",
-        style={"display": "flex", "flexDirection": "column", "height": "460px", "padding": "8px"}
-    )
+    ]
+    
+    add_q_style = {"display": "none", "width": "100%", "marginTop": "6px"} if is_create_new else {"display": "block", "width": "100%", "marginTop": "6px"}
+    
+    return header, nc_style, nc_progress, create_disabled, assign_row, add_q_style
 
 
 def _file_to_base64(path: str, size: int = 40) -> str:
@@ -1739,10 +2436,12 @@ def _render_import_panel(selected_folder: str | None, active_classes: list):
             html.Label("Class name:", className="ctrl-label",
                        style={"marginTop": "12px", "marginBottom": "4px"}),
             dcc.Input(
-                id="import-class-name-input",
+                id={"type": "import-class-name-input", "index": "active"},
                 value=default_name,
-                placeholder="Enter class name...",
+                placeholder="Custom class name...",
                 debounce=True,
+                autoComplete="off",
+                type="text",
                 style={
                     "width": "100%",
                     "background": "#2a2a2a",
@@ -1762,7 +2461,7 @@ def _render_import_panel(selected_folder: str | None, active_classes: list):
             ),
             html.Button(
                 "IMPORT AS NEW CLASS  ▶",
-                id="import-class-btn",
+                id={"type": "import-class-btn", "index": "active"},
                 className="btn-accent",
                 style={"width": "100%", "marginTop": "8px", "padding": "6px"},
                 disabled=import_disabled,
@@ -1780,7 +2479,8 @@ def _render_import_panel(selected_folder: str | None, active_classes: list):
 
 
 def _render_support(sel_class, sc, sel_sup, temp,
-                    whatif_sc=None, pending_rm=None, sidebar_mode="support"):
+                    whatif_sc=None, pending_rm=None, sidebar_mode="support",
+                    sup_deltas=None):
     header = html.Div(
         [
             html.Label("SUPPORT SET", className="ctrl-label", style={"textAlign": "center", "width": "100%", "marginBottom": "8px"}),
@@ -1805,6 +2505,13 @@ def _render_support(sel_class, sc, sel_sup, temp,
                         n_clicks=0,
                         title="Import images from custom_drawings/ as a new class",
                     ),
+                    html.Button(
+                        "⬇ EXPORT",
+                        id="export-support-btn",
+                        className="btn-group-item",
+                        n_clicks=0,
+                        title="Export curated support set as JSON for fine-tuning",
+                    ),
                 ],
                 className="btn-group",
             ),
@@ -1814,13 +2521,12 @@ def _render_support(sel_class, sc, sel_sup, temp,
     )
 
     items = list(sc.get(sel_class, []))
-    print(f"\n[_render_support] Class: {sel_class}")
-    print(f"[_render_support] Base items count: {len(items)}")
+    logger.debug("[_render_support] Class: %s, base items: %d", sel_class, len(items))
     if whatif_sc:
         staged_items = whatif_sc.get(sel_class, [])
-        print(f"[_render_support] Staged items for {sel_class}: {[it.get('idx') for it in staged_items]}")
+        logger.debug("[_render_support] Staged items for %s: %s", sel_class, [it.get('idx') for it in staged_items])
         drawn_items = [it for it in staged_items if isinstance(it.get("idx"), str) and it["idx"].startswith("drawn_")]
-        print(f"[_render_support] Appending {len(drawn_items)} drawn items")
+        logger.debug("[_render_support] Appending %d drawn items", len(drawn_items))
         items.extend(drawn_items)
 
     if not items:
@@ -1828,7 +2534,9 @@ def _render_support(sel_class, sc, sel_sup, temp,
             [header, html.Div("No support sketches.", className="hint-text")],
         )
 
-    diags = engine.support_diagnostics(sel_class, sc, temp)
+    # Use FAST diagnostics (skip expensive LOO computation)
+    diags = engine.support_diagnostics(sel_class, sc, temp, fast=True)
+    sup_deltas = sup_deltas or {}
     diag_by_idx = {d["idx"]: d for d in diags}
     ci = engine.class_names.index(sel_class) if sel_class in engine.class_names else 0
     col = CLASS_COLORS[ci % len(CLASS_COLORS)]
@@ -1871,7 +2579,8 @@ def _render_support(sel_class, sc, sel_sup, temp,
                     html.Div(
                         [
                             html.Img(src=add_thumb, className="support-thumb",
-                                     title=f"sketch #{staged_add_idx}"),
+                                     id={"type": "infl-thumb", "idx": staged_add_idx},
+                                     title=f"sketch #{staged_add_idx} \u2014 click to highlight in UMAP"),
                             html.Span(f"#{staged_add_idx}", className="support-idx"),
                         ],
                         className="support-thumb-col",
@@ -1889,10 +2598,10 @@ def _render_support(sel_class, sc, sel_sup, temp,
                     ),
                     html.Div(
                         [
-                            html.Button("✓", id="confirm-add-btn",
+                            html.Button("✓", id={"type": "confirm-add-btn", "index": "support"},
                                         className="inline-confirm",
                                         n_clicks=0, title="Confirm add"),
-                            html.Button("✕", id="cancel-add-btn",
+                            html.Button("✕", id={"type": "cancel-add-btn", "index": "support"},
                                         className="inline-cancel",
                                         n_clicks=0, title="Cancel"),
                         ],
@@ -1915,19 +2624,26 @@ def _render_support(sel_class, sc, sel_sup, temp,
         is_pending_rm = (pending_rm == idx)
 
         d = diag_by_idx.get(idx, {})
-        loo = d.get("loo_delta", 0.0)
-        cos = d.get("cos_sim", 0.0)
+        # Use background-computed delta if available
+        loo = sup_deltas.get(str(idx))
+        dist_val = d.get("dist", 0.0)
         comp = d.get("competitor_name", "")
         cdist_val = d.get("competitor_dist", 0.0)
-        loo_col = OK_COL if loo < -0.005 else (ERR_COL if loo > 0.005 else TEXT2)
+        
+        if loo is None:
+            loo_text = "…"
+            loo_col = TEXT2
+        else:
+            loo_text = f"{loo:+.1%}"
+            loo_col = OK_COL if loo < -0.005 else (ERR_COL if loo > 0.005 else TEXT2)
 
         diag_row = html.Div(
             [
-                html.Span(f"LOO {loo:+.1%}", className="diag-chip",
+                html.Span(f"LOO {loo_text}", className="diag-chip",
                           style={"color": loo_col},
                           title="Accuracy change if removed"),
-                html.Span(f"cos {cos:.2f}", className="diag-chip",
-                          title="Cosine sim to prototype"),
+                html.Span(f"dist {dist_val:.1f}", className="diag-chip",
+                          title="Euclidean distance to prototype"),
                 html.Span(f"→{comp} {cdist_val:.1f}", className="diag-chip",
                           title=f"Distance to nearest competitor ({comp})")
                 if comp else None,
@@ -1993,7 +2709,8 @@ def _render_support(sel_class, sc, sel_sup, temp,
                         html.Div(
                             [html.Img(src=thumb_src,
                                       className="support-thumb",
-                                      title=f"sketch {display_idx}"),
+                                      id={"type": "infl-thumb", "idx": idx},
+                                      title=f"sketch {display_idx} \u2014 click to highlight in UMAP"),
                              html.Span(display_idx, className="support-idx")],
                             className="support-thumb-col",
                         ),
@@ -2004,6 +2721,7 @@ def _render_support(sel_class, sc, sel_sup, temp,
                                      dcc.Input(id={"type": "wt-input", "index": idx},
                                                type="number", min=0.1, max=3.0,
                                                step=0.1, value=round(w, 1),
+                                               autoComplete="off",
                                                debounce=True, className="wt-input")],
                                     className="wt-row",
                                 ),
@@ -2076,6 +2794,8 @@ def stage_add_support(n, sel_q, sc):
     Output("sel-query-store", "data", allow_duplicate=True),
     Output("uirev-store", "data", allow_duplicate=True),
     Output("master-undo-store", "data", allow_duplicate=True),
+    Output("engine-version-store", "data", allow_duplicate=True),
+    Output("save-indicator", "children", allow_duplicate=True),
     Input("replace-image-btn", "n_clicks"),
     State("sel-query-store", "data"),
     State("uirev-store", "data"),
@@ -2083,17 +2803,19 @@ def stage_add_support(n, sel_q, sc):
     State("active-classes-store", "data"),
     State("color-map-store", "data"),
     State("master-undo-store", "data"),
+    State("engine-version-store", "data"),
     prevent_initial_call=True,
 )
-def replace_image_callback(n, sel_q, uirev, sc, classes, colors, undo_stack):
+def replace_image_callback(n, sel_q, uirev, sc, classes, colors, undo_stack, engine_ver):
     if not n or sel_q is None:
         raise PreventUpdate
     idx = int(sel_q)
     cname = engine.class_names[engine.labels[idx]]
     old_excluded = list(getattr(engine, "excluded_indices", set()))
-    
-    new_idx = engine.exclude_image(idx)
-    print(f"DEBUG: replace_image_callback: idx={idx}, new_idx={new_idx}")
+
+    with _engine_lock:
+        new_idx = engine.exclude_image(idx)
+    logger.debug("replace_image_callback: idx=%d, new_idx=%s", idx, new_idx)
     
     undo_stack = list(undo_stack or [])
     undo_stack.append({
@@ -2105,7 +2827,7 @@ def replace_image_callback(n, sel_q, uirev, sc, classes, colors, undo_stack):
     })
     undo_stack = undo_stack[-_MAX_UNDO:]
     
-    return new_idx, (uirev or 0) + 1, undo_stack
+    return new_idx, (uirev or 0) + 1, undo_stack, (engine_ver or 0) + 1, "● UNSAVED"
 
 
 # ── 8b. Navigate to wrong-class support item ────────────────────
@@ -2136,11 +2858,71 @@ def navigate_to_wrong_support(clicks, ids):
     return cls, s_idx, None
 
 
+# ── 8c. Co-activation toggle ─────────────────────────────────────
+# Clicking ⊙ on an influencer row shows/hides the heatmap pair inline.
+# Uses clientside callback to avoid server round-trip.
+
+app.clientside_callback(
+    """
+    function(clicks, ids) {
+        var ctx = window.dash_clientside;
+        if (!clicks || clicks.every(function(c) { return !c; }))
+            return ctx.no_update;
+        var triggered = JSON.parse(document.querySelector('[data-dash-is-loading]') ?
+            '{}' : (window._lastTriggeredId || '{}'));
+        // Find which button was clicked (last non-zero)
+        var last = -1;
+        for (var i = 0; i < clicks.length; i++) {
+            if (clicks[i]) last = i;
+        }
+        if (last === -1) return ctx.no_update;
+        var key = ids[last].key;
+        var panels = document.querySelectorAll('[id*="coact-panel"]');
+        panels.forEach(function(p) {
+            try {
+                var pid = JSON.parse(p.id.replace(/^.*?({.*}).*?$/, '$1'));
+                if (pid.key === key) {
+                    p.style.display = (p.style.display === 'none' || !p.style.display)
+                        ? 'flex' : 'none';
+                }
+            } catch(e) {}
+        });
+        return ctx.no_update;
+    }
+    """,
+    Output("coact-open-store", "data"),
+    Input({"type": "coact-toggle", "key": ALL}, "n_clicks"),
+    State({"type": "coact-toggle", "key": ALL}, "id"),
+    prevent_initial_call=True,
+)
+
+
+# ── 8d. Influencer thumbnail click → highlight in UMAP ───────────
+
+@app.callback(
+    Output("sel-support-store", "data", allow_duplicate=True),
+    Input({"type": "infl-thumb", "idx": ALL}, "n_clicks"),
+    State({"type": "infl-thumb", "idx": ALL}, "id"),
+    prevent_initial_call=True,
+)
+def infl_thumb_highlight(clicks, ids):
+    if not clicks or not any(v for v in clicks if v):
+        raise PreventUpdate
+    ctx = callback_context
+    if not ctx.triggered:
+        raise PreventUpdate
+    triggered = ctx.triggered_id
+    if not isinstance(triggered, dict):
+        raise PreventUpdate
+    return triggered["idx"]
+
+
 # ── 10. Weight change ────────────────────────────────────────────
 
 
 @app.callback(
     Output("sc-store", "data", allow_duplicate=True),
+    Output("save-indicator", "children", allow_duplicate=True),
     Input({"type": "wt-input", "index": ALL}, "value"),
     State({"type": "wt-input", "index": ALL}, "id"),
     State("sc-store", "data"),
@@ -2161,8 +2943,7 @@ def update_weights(values, ids, sc):
                     changed = True
     if not changed:
         raise PreventUpdate
-    return sc
-
+    return sc, "● UNSAVED"
 
 
 # ── 11b. Stage: set pending-remove ──────────────────────────────
@@ -2221,19 +3002,20 @@ def _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view
                     data_dir = Path(__file__).resolve().parent.parent / 'data' / 'quickdraw' / 'test'
                     save_dir = data_dir / cname
                     save_dir.mkdir(parents=True, exist_ok=True)
-                    save_path = save_dir / f"drawn_{int(time.time())}.png"
+                    save_path = save_dir / f"drawn_{uuid.uuid4().hex[:8]}.png"
                     
                     img = Image.open(__import__('io').BytesIO(decoded)).convert('L')
                     img.save(save_path)
                     
                     img_arr = np.array(img.resize((64, 64)))
-                    new_idx = engine.add_custom_image(cname, img_arr, np.array(it["emb_hd"]), np.array(it["pos2d"]))
+                    with _engine_lock:
+                        new_idx = engine.add_custom_image(cname, img_arr, np.array(it["emb_hd"]), np.array(it["pos2d"]))
                     if new_idx != -1:
                         it["idx"] = new_idx
                         it.pop("emb_hd", None)
                         it.pop("pos2d", None)
                 except Exception as e:
-                    print(f"Error committing drawn image: {e}")
+                    logger.error("Error committing drawn image: %s", e)
 
     added, removed = _diff_sc(sc, final_whatif)
     whatif_sc = final_whatif
@@ -2253,12 +3035,11 @@ def _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view
     new_undo = (list(undo_stack or []) + [{"desc": label, "sc": sc, "classes": classes, "colors": colors}])[-_MAX_UNDO:]
     new_view_id = (view_id or 0) + 1
 
-    # Persist session
+    # Persist session (DISABLED AUTOSAVE)
     engine.default_support = whatif_sc
-    engine.save_session(_SESSION_PATH, {"sc": whatif_sc, "classes": classes, "colors": colors})
+    # engine.save_session(_SESSION_PATH, {"sc": whatif_sc, "classes": classes, "colors": colors})
 
     return whatif_sc, new_undo, [], None, new_log, new_view_id
-
 
 
 @app.callback(
@@ -2269,6 +3050,7 @@ def _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view
     Output("changelog-store",      "data", allow_duplicate=True),
     Output("master-view-id",          "data", allow_duplicate=True),
     Output("pending-remove-store", "data", allow_duplicate=True),
+    Output("save-indicator",       "children", allow_duplicate=True),
     Input({"type": "confirm-rm-btn", "idx": ALL}, "n_clicks"),
     State("whatif-store",      "data"),
     State("sc-store",          "data"),
@@ -2287,8 +3069,7 @@ def confirm_remove(clicks, whatif_sc, sc, classes, colors, temp, undo_stack, cha
     if not whatif_sc:
         raise PreventUpdate
     out = _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id)
-    return out[0], out[1], out[2], out[3], out[4], out[5], None
-
+    return out[0], out[1], out[2], out[3], out[4], out[5], None, "● UNSAVED"
 
 # ── 14. Cancel remove ────────────────────────────────────────────
 
@@ -2316,7 +3097,8 @@ def cancel_remove(clicks):
     Output("whatif-store",     "data", allow_duplicate=True),
     Output("changelog-store",  "data", allow_duplicate=True),
     Output("master-view-id",      "data", allow_duplicate=True),
-    Input("confirm-add-btn",   "n_clicks"),
+    Output("save-indicator",     "children", allow_duplicate=True),
+    Input({"type": "confirm-add-btn", "index": ALL}, "n_clicks"),
     State("whatif-store",      "data"),
     State("sc-store",          "data"),
     State("active-classes-store", "data"),
@@ -2328,22 +3110,22 @@ def cancel_remove(clicks):
     State("drawing-strokes-store", "data"),
     prevent_initial_call=True,
 )
-def confirm_add(n, whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id, drawn_url):
-    if not n or not whatif_sc:
+def confirm_add(clicks, whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id, drawn_url):
+    if not clicks or not any(v for v in clicks if v) or not whatif_sc:
         raise PreventUpdate
-    return _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id, drawn_url)
-
+    res = _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id, drawn_url)
+    return *res, "● UNSAVED"
 
 # ── 16. Cancel add ───────────────────────────────────────────────
 
 
 @app.callback(
     Output("whatif-store", "data", allow_duplicate=True),
-    Input("cancel-add-btn", "n_clicks"),
+    Input({"type": "cancel-add-btn", "index": ALL}, "n_clicks"),
     prevent_initial_call=True,
 )
-def cancel_add(n):
-    if not n:
+def cancel_add(clicks):
+    if not clicks or not any(v for v in clicks if v):
         raise PreventUpdate
     return None
 
@@ -2639,6 +3421,7 @@ def toggle_chip_draft(clicks, ids, active, pending):
     Output("custom-classes-store",  "data",  allow_duplicate=True),
     Output("master-undo-store",     "data", allow_duplicate=True),
     Output("master-redo-store",     "data", allow_duplicate=True),
+    Output("save-indicator",        "children", allow_duplicate=True),
     Input("apply-classes-btn", "n_clicks"),
     State("active-classes-store",  "data"),
     State("pending-classes-store", "data"),
@@ -2675,18 +3458,24 @@ def apply_class_changes(n, active, pending, sc, colors, sel_class, undo_stack):
     # Remove classes no longer wanted
     to_remove = active_set - pending_set
     if to_remove:
-        # Disk Cleanup: delete custom class directories from data/
+        # Soft delete: move custom class directories to .trash/ so undo can recover them
         data_dir = Path(__file__).resolve().parent.parent / 'data' / 'quickdraw' / 'test'
+        trash_dir = Path(__file__).resolve().parent.parent / '.trash'
+        trash_dir.mkdir(exist_ok=True)
         for name in to_remove:
             cls_dir = data_dir / name
             if cls_dir.exists() and any(cls_dir.glob("drawn_*.png")):
                 try:
-                    shutil.rmtree(cls_dir)
-                    print(f"Deleted custom class folder: {cls_dir}")
+                    dest = trash_dir / name
+                    if dest.exists():
+                        shutil.rmtree(dest)   # overwrite stale trash entry
+                    shutil.move(str(cls_dir), str(dest))
+                    logger.info("Soft-deleted custom class folder to trash: %s", cls_dir)
                 except Exception as e:
-                    print(f"Error deleting folder {cls_dir}: {e}")
+                    logger.error("Error moving folder %s to trash: %s", cls_dir, e)
 
-        idx_map = engine.remove_classes(list(to_remove))
+        with _engine_lock:
+            idx_map = engine.remove_classes(list(to_remove))
         for cname in list(sc.keys()):
             updated = []
             for it in sc[cname]:
@@ -2712,11 +3501,12 @@ def apply_class_changes(n, active, pending, sc, colors, sel_class, undo_stack):
     for name in to_add:
         if len(engine.class_names) >= cap:
             break
-        ok = engine.add_class(name)
+        with _engine_lock:
+            ok = engine.add_class(name)
         if ok:
             sc[name] = engine.default_support.get(name, [])
         else:
-            print(f"add_class failed for {name!r}")
+            logger.error("add_class failed for %r", name)
 
     new_active  = list(engine.class_names)
     new_pending = new_active[:]               
@@ -2726,7 +3516,8 @@ def apply_class_changes(n, active, pending, sc, colors, sel_class, undo_stack):
     # Refresh custom classes from disk after deletions/additions
     new_custom = _get_custom_classes_from_disk()
     
-    return new_active, new_pending, sc, options, new_sel, new_custom, undo_stack, []
+    return new_active, new_pending, sc, options, new_sel, new_custom, undo_stack, [], "● UNSAVED"
+
 
 
 # ── P4-8. Cycle class color ───────────────────────────────────────
@@ -2786,7 +3577,9 @@ def cycle_class_color(clicks, ids, sc, active, color_map, undo_stack):
         next_idx = (next_idx + 1) % cap
 
     color_map[name] = next_idx
-    return color_map, undo_stack, []
+    return color_map, undo_stack, [], "● UNSAVED"
+
+
 
 
 # ── P4-5. Manual save button ─────────────────────────────────────
@@ -2799,16 +3592,19 @@ def cycle_class_color(clicks, ids, sc, active, color_map, undo_stack):
     State("active-classes-store", "data"),
     State("color-map-store", "data"),
     State("custom-classes-store", "data"),
+    State("master-view-id", "data"), # To get the current uirevision
     prevent_initial_call=True,
 )
-def manual_save(n, sc, classes, colors, custom_classes):
+def manual_save(n, sc, classes, colors, custom_classes, uirev):
     if not n:
         raise PreventUpdate
     app_state = {
         "sc": sc or {},
         "classes": classes or list(engine.class_names),
         "colors": colors or {},
-        "custom_classes": custom_classes or []
+        "custom_classes": custom_classes or [],
+        "embeddings_2d": engine.embeddings_2d.tolist(), # Save current layout
+        "uirevision": uirev # Save current uirevision
     }
 
     engine.save_session(_SESSION_PATH, app_state)
@@ -2858,7 +3654,7 @@ app.clientside_callback(
     """
     function(text) {
         if (!text || typeof text !== 'string') return window.dash_clientside.no_update;
-        if (text.startsWith('\u25cf') || text.startsWith('\u2713')) {
+        if (text === '\u25cf SAVED' || text.startsWith('\u2713')) {
             return new Promise(function(resolve) {
                 setTimeout(function() { resolve(''); }, 1000);
             });
@@ -2902,7 +3698,10 @@ def sync_class_selector_options(active):
 def reset_all(n):
     if not n:
         raise PreventUpdate
-    return engine.default_support, {}, [], [], None, None, [], None
+    return engine.default_support, {}, [], [], None, None, [], None, "● UNSAVED"
+
+
+
 
 
 # ── Phase 5 Callbacks (Candidate Pool) ───────────────────────────
@@ -2932,7 +3731,7 @@ def switch_sidebar_mode(clicks, ids):
 
     if btn_id == "candidates":
         return "candidates", None, None
-    elif btn_id == "support":
+    elif btn_id == "support" or btn_id == "back-to-support":
         return "support", None, None
     elif btn_id == "draw":
         return "draw", None, None
@@ -2986,9 +3785,10 @@ def select_import_folder(clicks, ids, current_folder):
     Output("sidebar-mode-store",    "data",    allow_duplicate=True),
     Output("master-undo-store",     "data",    allow_duplicate=True),
     Output("master-redo-store",     "data",    allow_duplicate=True),
-    Input("import-class-btn", "n_clicks"),
+    Output("save-indicator",       "children", allow_duplicate=True),
+    Input({"type": "import-class-btn", "index": ALL}, "n_clicks"),
     State("import-selected-folder-store", "data"),
-    State("import-class-name-input", "value"),
+    State({"type": "import-class-name-input", "index": ALL}, "value"),
     State("active-classes-store",  "data"),
     State("sc-store",              "data"),
     State("color-map-store",       "data"),
@@ -2997,11 +3797,12 @@ def select_import_folder(clicks, ids, current_folder):
     State("master-undo-store",     "data"),
     prevent_initial_call=True,
 )
-def import_custom_class(n, source_folder, assign_name, active, sc, colors,
+def import_custom_class(n_list, source_folder, assign_name_list, active, sc, colors,
                         sel_class, custom_classes, undo_stack):
-    if not n or not source_folder:
+    if not n_list or not any(v for v in n_list if v) or not source_folder:
         raise PreventUpdate
 
+    assign_name = assign_name_list[0] if assign_name_list else source_folder
     name = (assign_name or source_folder).strip()
     if not name:
         raise PreventUpdate
@@ -3026,7 +3827,8 @@ def import_custom_class(n, source_folder, assign_name, active, sc, colors,
     })
     undo_stack = undo_stack[-_MAX_UNDO:]
 
-    ok = engine.add_class_from_custom_drawings(name, source_folder=source_folder)
+    with _engine_lock:
+        ok = engine.add_class_from_custom_drawings(name, source_folder=source_folder)
     if not ok:
         raise PreventUpdate
 
@@ -3044,28 +3846,25 @@ def import_custom_class(n, source_folder, assign_name, active, sc, colors,
     if name not in existing_custom:
         existing_custom.append(name)
 
-    # Persist session
+    # Persist session (DISABLED AUTOSAVE)
     engine.default_support = new_sc
-    engine.save_session(_SESSION_PATH, {
-        "sc": new_sc,
-        "classes": new_active,
-        "colors": colors or {},
-        "custom_classes": existing_custom,
-    })
 
     return (new_active, new_pending, new_sc, options, new_sel,
-            existing_custom, None, "support", undo_stack, [])
+            existing_custom, None, "support", undo_stack, [], "● UNSAVED")
 
 
 @app.callback(
     Output("candidate-scatter", "figure"),
-    Input("class-selector", "value"),
-    Input("sc-store", "data"),
+    Input("class-selector",    "value"),
+    Input("sc-store",          "data"),
     Input("candidate-delta-store", "data"),
-    Input("whatif-store", "data"),
-    State("temp-slider", "value"),
+    Input("whatif-store",      "data"),
+    Input("sel-query-store",   "data"),
+    Input("highlight-store",   "data"),
+    Input("sel-support-store", "data"),
+    State("temp-slider",       "value"),
 )
-def render_candidate_scatter(sel_class, sc, delta_cache, whatif_sc, temp):
+def render_candidate_scatter(sel_class, sc, delta_cache, whatif_sc, sel_q, hl_idx, sel_sup, temp):
     cands = engine.class_images_pool(sel_class, sc)
     if not cands:
          fig = go.Figure()
@@ -3085,7 +3884,7 @@ def render_candidate_scatter(sel_class, sc, delta_cache, whatif_sc, temp):
         in_sc = idx in sc_idxs
         in_wt = idx in whatif_idxs
 
-        x.append(c["cos_sim"])
+        x.append(c["dist"])
         y.append(c["competitor_dist"])
         idxs.append(idx)
 
@@ -3113,7 +3912,7 @@ def render_candidate_scatter(sel_class, sc, delta_cache, whatif_sc, temp):
 
         d = delta_cache.get(str(idx)) if delta_cache else None
         d_text = f"{d:+.1%}" if d is not None else "computing..."
-        texts.append(f"#{idx}<br>State: {state_txt}<br>cos sim: {c['cos_sim']:.3f}<br>comp dist: {c['competitor_dist']:.1f}<br>delta: {d_text}")
+        texts.append(f"#{idx}<br>State: {state_txt}<br>dist to prototype: {c['dist']:.2f}<br>comp dist: {c['competitor_dist']:.1f}<br>delta: {d_text}")
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -3126,8 +3925,8 @@ def render_candidate_scatter(sel_class, sc, delta_cache, whatif_sc, temp):
     ))
     fig.update_layout(
         title=f"{sel_class.upper()} Candidates",
-        xaxis_title="cos sim to prototype →",
-        yaxis_title="competitor dist →",
+        xaxis_title="← dist to own prototype",
+        yaxis_title="↑ dist to competitor",
         dragmode="pan",
         margin=dict(l=50, r=20, t=40, b=50),
         template="plotly_dark",
@@ -3137,11 +3936,88 @@ def render_candidate_scatter(sel_class, sc, delta_cache, whatif_sc, temp):
     )
     fig.update_xaxes(rangemode="normal", showgrid=True, gridcolor="#3a4235")
     fig.update_yaxes(rangemode="normal", showgrid=True, gridcolor="#3a4235")
+
+    # Initial highlight rings if anything is already selected
+    combined_hl = set()
+    if sel_q is not None: combined_hl.add(sel_q)
+    if sel_sup is not None: combined_hl.add(sel_sup)
+    if hl_idx:
+        if isinstance(hl_idx, int): combined_hl.add(hl_idx)
+        else: combined_hl.update([int(i) for i in hl_idx if i is not None])
+
+    if combined_hl:
+        hx, hy = [], []
+        for i, idx in enumerate(idxs):
+            if idx in combined_hl:
+                hx.append(x[i])
+                hy.append(y[i])
+        if hx:
+            fig.add_trace(go.Scatter(
+                x=hx, y=hy,
+                mode="markers",
+                marker=dict(size=16, color="rgba(0,0,0,0)",
+                            line=dict(width=2.5, color="#ffffff")),
+                showlegend=False, hoverinfo="skip",
+                uid="highlight-rings",
+            ))
+
     return fig
 
 
 @app.callback(
+    Output("candidate-scatter", "figure", allow_duplicate=True),
+    Input("highlight-store",    "data"),
+    Input("sel-query-store",    "data"),
+    Input("sel-support-store",  "data"),
+    State("candidate-scatter",  "figure"),
+    prevent_initial_call=True,
+)
+def update_candidate_highlight_rings(hl_idx, sel_q, sel_sup, current_fig):
+    """Patch rings onto candidate scatter in real-time."""
+    if current_fig is None:
+        raise PreventUpdate
+    p = Patch()
+    existing = current_fig.get("data", [])
+    filtered = [t for t in existing if t.get("uid") != "highlight-rings"]
+
+    combined_hl = set()
+    if sel_q is not None: combined_hl.add(sel_q)
+    if sel_sup is not None: combined_hl.add(sel_sup)
+    if hl_idx:
+        if isinstance(hl_idx, int): combined_hl.add(hl_idx)
+        else: combined_hl.update([int(i) for i in hl_idx if i is not None])
+
+    main_trace = next((t for t in existing if t.get("mode") == "markers" and t.get("uid") != "highlight-rings"), None)
+    if main_trace and combined_hl:
+        cand_idxs = main_trace.get("customdata", [])
+        cand_x    = main_trace.get("x", [])
+        cand_y    = main_trace.get("y", [])
+        hx, hy = [], []
+        for i, c_idx in enumerate(cand_idxs):
+            if c_idx in combined_hl:
+                hx.append(cand_x[i])
+                hy.append(cand_y[i])
+        if hx:
+            ring = go.Scatter(
+                x=hx, y=hy,
+                mode="markers",
+                marker=dict(size=16, color="rgba(0,0,0,0)",
+                            line=dict(width=2.5, color="#ffffff")),
+                showlegend=False, hoverinfo="skip",
+                uid="highlight-rings",
+            )
+            p["data"] = filtered + [ring]
+            return p
+
+    if len(filtered) == len(existing):
+        raise PreventUpdate
+    p["data"] = filtered
+    return p
+
+
+@app.callback(
     Output("candidate-delta-store", "data"),
+    Output("support-delta-store",   "data"),
     Output("delta-interval", "disabled"),
     Input("delta-interval", "n_intervals"),
     Input("sidebar-mode-store", "data"),
@@ -3149,46 +4025,64 @@ def render_candidate_scatter(sel_class, sc, delta_cache, whatif_sc, temp):
     State("sc-store", "data"),
     State("temp-slider", "value"),
     State("candidate-delta-store", "data"),
+    State("support-delta-store",   "data"),
 )
-def candidate_interval_update(n, mode, sel_class, sc, temp, cache):
+def background_delta_worker(n, mode, sel_class, sc, temp, cand_cache, sup_cache):
+    """Computes deltas one-by-one in the background for either
+    the current candidate pool OR the current support set.
+    """
     ctx = callback_context
     triggered_ids = [t["prop_id"].split(".")[0] for t in ctx.triggered]
 
-    if mode != "candidates":
-        return {}, True
+    if mode not in ["candidates", "support"]:
+        return {}, {}, True
 
+    # Reset caches if the class or context changed
     if "sidebar-mode-store" in triggered_ids or "class-selector" in triggered_ids:
-        cache = {}
+        cand_cache = {}
+        sup_cache = {}
 
-    cands = engine.class_images_pool(sel_class, sc)
-    if not cands:
-        return {}, True
+    cand_cache = dict(cand_cache or {})
+    sup_cache  = dict(sup_cache or {})
 
-    # Only compute deltas for Non-Support images (candidates)
-    cands = [c for c in cands if not c.get("is_support")]
-    if not cands:
-        return cache, True
+    # 1. Prioritize Support Set LOO deltas (visible in the main support list)
+    if sel_class in sc:
+        items = sc[sel_class]
+        # Only compute if more than 1 item (otherwise delta=0 by definition)
+        if len(items) > 1:
+            uncomputed_sup = [it for it in items if str(it["idx"]) not in sup_cache]
+            if uncomputed_sup:
+                target = uncomputed_sup[0]
+                idx = target["idx"]
+                delta = engine.support_loo_delta(sel_class, idx, sc, temp)
+                sup_cache[str(idx)] = delta
+                return cand_cache, sup_cache, False
 
-    cache = dict(cache or {})
-    uncomputed = [c for c in cands if str(c["idx"]) not in cache]
-    
-    if not uncomputed:
-        return cache, True
+    # 2. Compute Candidate deltas if in candidate mode
+    if mode == "candidates":
+        pool = engine.class_images_pool(sel_class, sc)
+        if pool:
+            # Candidates are items that are NOT currently in support
+            cands = [c for c in pool if not c.get("is_support")]
+            uncomputed_cand = [c for c in cands if str(c["idx"]) not in cand_cache]
+            if uncomputed_cand:
+                target = uncomputed_cand[0]
+                idx = target["idx"]
+                delta = engine.candidate_add_delta(sel_class, idx, sc, temp)
+                cand_cache[str(idx)] = delta
+                return cand_cache, sup_cache, False
 
-    cand = uncomputed[0]
-    idx = cand["idx"]
-    delta = engine.candidate_add_delta(sel_class, idx, sc, temp)
-    cache[str(idx)] = delta
-
-    return cache, False
+    # Nothing more to compute
+    return cand_cache, sup_cache, True
 
 
 @app.callback(
-    Output("whatif-store", "data", allow_duplicate=True),
+    Output("whatif-store",    "data", allow_duplicate=True),
+    Output("highlight-store", "data", allow_duplicate=True),
     Input("candidate-scatter", "clickData"),
-    State("class-selector", "value"),
-    State("sc-store", "data"),
-    State("whatif-store", "data"),
+    State("class-selector",    "value"),
+    State("sc-store",          "data"),
+    State("whatif-store",      "data"),
     prevent_initial_call=True,
 )
 def toggle_graph_item(click, sel_class, sc, whatif_sc):
@@ -3211,7 +4105,8 @@ def toggle_graph_item(click, sel_class, sc, whatif_sc):
     else:
         trial[sel_class] = class_items + [{"idx": int(idx), "weight": 1.0}]
 
-    return trial
+    # Highlight the clicked point in the main UMAP
+    return trial, [int(idx)]
 
 
 @app.callback(
@@ -3221,6 +4116,7 @@ def toggle_graph_item(click, sel_class, sc, whatif_sc):
     Output("whatif-store",         "data", allow_duplicate=True),
     Output("changelog-store",      "data", allow_duplicate=True),
     Output("master-view-id",          "data", allow_duplicate=True),
+    Output("save-indicator",       "children", allow_duplicate=True),
     Input("apply-graph-btn", "n_clicks"),
     State("whatif-store", "data"),
     State("sc-store", "data"),
@@ -3235,15 +4131,17 @@ def toggle_graph_item(click, sel_class, sc, whatif_sc):
 def apply_graph_changes(n, whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id):
     if not n or not whatif_sc:
         raise PreventUpdate
-    return _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id)
+    res = _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view_id)
+    return *res, "● UNSAVED"
 
 
 @app.callback(
     Output("sidebar-container", "className"),
-    Input("sidebar-mode-store", "data")
+    Input("sidebar-mode-store", "data"),
+    Input("overview-tab-store", "data")
 )
-def update_sidebar_classname(mode):
-    if mode == "candidates" or mode == "draw":
+def update_sidebar_classname(mode, overview_tab):
+    if mode == "candidates" or mode == "draw" or overview_tab == "confusion":
         return "sidebar sidebar--expanded"
     return "sidebar"
 
@@ -3424,15 +4322,7 @@ def process_draw_strokes(data_url, sc, temp, active_class_list):
     except Exception:
         raise PreventUpdate
 
-@app.callback(
-    Output("new-class-controls", "style"),
-    Output("add-query-btn", "style"),
-    Input({"type": "assign-class-dropdown", "index": "main"}, "value")
-)
-def toggle_new_class_controls(assign_class):
-    if assign_class == "CREATE_NEW":
-        return {"display": "block"}, {"display": "none", "width": "100%", "marginTop": "6px"}
-    return {"display": "none"}, {"display": "block", "width": "100%", "marginTop": "6px"}
+# toggle_new_class_controls was merged into render_detail_panels_callback
 
 
 
@@ -3451,8 +4341,8 @@ def save_new_class_name(val):
     Output("whatif-store", "data", allow_duplicate=True),
     Output("new-class-drawings-store", "data", allow_duplicate=True),
     Output("stage-draw-btn", "children"),
-    Output("create-class-btn", "disabled"),
-    Output("new-class-progress", "children"),
+    Output("create-class-btn", "disabled", allow_duplicate=True),
+    Output("new-class-progress", "children", allow_duplicate=True),
     Output("sidebar-mode-store", "data", allow_duplicate=True),
     Output("sc-store", "data", allow_duplicate=True),
     Input("stage-draw-btn", "n_clicks"),
@@ -3468,7 +4358,6 @@ def stage_drawn_image(n, ghost_data, active_class_list, sc, data_url, whatif_sc,
     if not n or not ghost_data:
         raise PreventUpdate
     
-    assign_class = active_class_list[0] if active_class_list else None
     if not assign_class:
         raise PreventUpdate
         
@@ -3490,9 +4379,10 @@ def stage_drawn_image(n, ghost_data, active_class_list, sc, data_url, whatif_sc,
         img_arr = _np.array(img.resize((64, 64)))
         hd_emb = _np.array(ghost_data["hd"])
         pos_2d  = _np.array(ghost_data["pos2d"])
-        new_idx = engine.add_custom_image(assign_class, img_arr, hd_emb, pos_2d)
+        with _engine_lock:
+            new_idx = engine.add_custom_image(assign_class, img_arr, hd_emb, pos_2d)
     except Exception as e:
-        print(f"Error registering drawn image: {e}")
+        logger.error("Error registering drawn image: %s", e)
         raise PreventUpdate
 
     if new_idx == -1:
@@ -3542,9 +4432,10 @@ def add_query_point(n, ghost_data, active_class_list, data_url, engine_ver):
         img_arr = _np.array(img.resize((64, 64)))
         hd_emb = _np.array(ghost_data["hd"])
         pos_2d  = _np.array(ghost_data["pos2d"])
-        new_idx = engine.add_custom_image(assign_class, img_arr, hd_emb, pos_2d)
+        with _engine_lock:
+            new_idx = engine.add_custom_image(assign_class, img_arr, hd_emb, pos_2d)
     except Exception as e:
-        print(f"Error adding query point: {e}")
+        logger.error("Error adding query point: %s", e)
         raise PreventUpdate
 
     if new_idx == -1:
@@ -3554,15 +4445,16 @@ def add_query_point(n, ghost_data, active_class_list, data_url, engine_ver):
 
 
 @app.callback(
-    Output("sc-store", "data", allow_duplicate=True),
+    Output("sc-store",               "data", allow_duplicate=True),
     Output("new-class-drawings-store", "data", allow_duplicate=True),
-    Output("sidebar-mode-store", "data", allow_duplicate=True),
-    Output({"type": "assign-class-dropdown", "index": "main"}, "value"),
+    Output("sidebar-mode-store",      "data", allow_duplicate=True),
+    Output("sel-query-store",         "data", allow_duplicate=True),
     Output("active-classes-store",   "data", allow_duplicate=True),
     Output("pending-classes-store",  "data", allow_duplicate=True),
     Output("custom-classes-store",   "data", allow_duplicate=True),
     Output("class-selector",         "options", allow_duplicate=True),
-    Output("class-selector",         "value",   allow_duplicate=True),
+    Output("class-selector",         "value", allow_duplicate=True),
+    Output("save-indicator",         "children", allow_duplicate=True),
     Input("create-class-btn", "n_clicks"),
     State("new-class-name", "value"),
     State("new-class-drawings-store", "data"),
@@ -3594,7 +4486,8 @@ def create_new_class(n_clicks, class_name, drawings, sc, custom_classes, sel_cla
         img = Image.open(io.BytesIO(decoded)).convert('L')
         img.resize((64, 64)).save(cls_dir / f"drawn_{i}.png")
         
-    success = engine.add_class(class_name)
+    with _engine_lock:
+        success = engine.add_class(class_name)
     if not success:
         raise PreventUpdate
         
@@ -3607,7 +4500,127 @@ def create_new_class(n_clicks, class_name, drawings, sc, custom_classes, sel_cla
         new_custom.append(class_name)
 
     options = [{"label": c, "value": c} for c in new_active]
-    return new_sc, [], "support", class_name, new_active, new_active[:], new_custom, options, class_name
+    return new_sc, [], "support", class_name, new_active, new_active[:], new_custom, options, class_name, "● UNSAVED"
+
+# ── Export support configuration ─────────────────────────────────
+
+@app.callback(
+    Output("export-download", "data"),
+    Input("export-support-btn", "n_clicks"),
+    State("sc-store", "data"),
+    prevent_initial_call=True,
+)
+def export_support_config(n, sc):
+    if not n or not sc:
+        raise PreventUpdate
+
+    export = {}
+    for cname, items in sc.items():
+        class_entries = []
+        for it in items:
+            idx = it["idx"]
+            weight = it.get("weight", 1.0)
+            is_drawn = isinstance(idx, str) and str(idx).startswith("drawn_")
+            if is_drawn:
+                entry = {"idx": idx, "weight": weight, "source": "drawn"}
+            else:
+                idx_int = int(idx)
+                path = str(engine.image_paths[idx_int]) if idx_int < len(engine.image_paths) else ""
+                entry = {
+                    "idx": idx_int,
+                    "weight": weight,
+                    "source": "dataset",
+                    "path": path,
+                }
+            class_entries.append(entry)
+        export[cname] = class_entries
+
+    payload = {
+        "exported_at": datetime.now().isoformat(),
+        "n_classes": len(export),
+        "classes": export,
+    }
+    return dcc.send_string(
+        json.dumps(payload, indent=2),
+        filename=f"support_config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+    )
+
+
+# ── Filter influencer list ────────────────────────────────────────
+# Stores filter state so it persists when inspector re-renders.
+
+@app.callback(
+    Output("infl-filter-store", "data"),
+    Input({"type": "infl-class-filter", "index": ALL}, "value"),
+    Input({"type": "infl-why-mode", "index": ALL}, "value"),
+    State("infl-filter-store",   "data"),
+    prevent_initial_call=True,
+)
+def update_infl_filter(cls_filter_list, mode_filter_list, current):
+    cls_filter = next((v for v in cls_filter_list if v), "all")
+    mode_filter = next((v for v in mode_filter_list if v), "all")
+    current = current or {"top_n": 5, "cls": "all", "sort": "sim", "mode": "all"}
+    return {
+        **current,
+        "top_n": 5,
+        "cls": cls_filter or "all",
+        "mode": mode_filter or "all"
+    }
+
+
+@app.callback(
+    Output("scatter", "figure", allow_duplicate=True),
+    Input("highlight-store",   "data"),
+    Input("sel-support-store", "data"),
+    Input("sel-query-store",   "data"),
+    State("scatter",           "figure"),
+    prevent_initial_call=True,
+)
+def update_highlight_rings(idxs, sel_sup, sel_q, current_fig):
+    """Highlight indices (from candidates, support list, or confusion matrix)."""
+    if current_fig is None:
+        raise PreventUpdate
+    p = Patch()
+    existing = current_fig.get("data", [])
+    filtered = [t for t in existing if t.get("uid") != "highlight-rings"]
+
+    # Combined list of indices to highlight with white rings
+    combined_idxs = []
+    if idxs:
+        if isinstance(idxs, (int, str)):
+            try:
+                combined_idxs.append(int(idxs))
+            except:
+                pass
+        else:
+            combined_idxs.extend([int(i) for i in idxs if i is not None])
+    
+    if sel_sup is not None and isinstance(sel_sup, int):
+        combined_idxs.append(sel_sup)
+    
+    if sel_q is not None and isinstance(sel_q, int):
+        combined_idxs.append(sel_q)
+
+    # Unique valid indices
+    combined_idxs = list(set(combined_idxs))
+    valid_idxs = [i for i in combined_idxs if i < len(engine.embeddings_2d)]
+
+    if valid_idxs:
+        ring = go.Scatter(
+            x=[engine.embeddings_2d[i, 0] for i in valid_idxs],
+            y=[engine.embeddings_2d[i, 1] for i in valid_idxs],
+            mode="markers",
+            marker=dict(size=14, color="rgba(0,0,0,0)",
+                        line=dict(width=2.5, color="#ffffff")), # White for special highlights
+            showlegend=False, hoverinfo="skip",
+            uid="highlight-rings",
+        )
+        p["data"] = filtered + [ring]
+    else:
+        if len(filtered) == len(existing):
+            raise PreventUpdate
+        p["data"] = filtered
+    return p
 
 
 # =====================================================================
