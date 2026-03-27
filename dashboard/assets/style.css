@@ -1402,10 +1402,23 @@ button.apply-classes-btn--active:hover {
     }
 }
 
-/* Scatter loading overlay — fills the plot container */
-#scatter-loading {
-    height: 100%;
-    width: 100%;
+/* Global loading indicator — zero layout footprint, renders over header */
+#global-loading {
+    width: 0;
+    height: 0;
+    overflow: visible;
+    position: relative;
+    flex-shrink: 0;
+}
+
+#global-loading>div {
+    position: absolute !important;
+    top: -8px;
+    left: -14px;
+    transform: scale(0.55);
+    transform-origin: left center;
+    background: none !important;
+    white-space: nowrap;
 }
 
 /* Draw-mode live confidence readout */
@@ -1487,10 +1500,8 @@ button.class-chip--custom-inactive {
     display: flex;
     flex-direction: column;
     background: #232820;
-    /* solid CARD_BG, not see-through */
     border: 1px solid #3a4235;
     border-left: 3px solid var(--cls-col, #3a4235);
-    /* class color accent */
     border-radius: 4px;
     overflow: hidden;
     margin-bottom: 6px;
@@ -1562,7 +1573,6 @@ button.class-chip--custom-inactive {
     text-overflow: ellipsis;
     max-width: 110px;
     border: 1px solid transparent;
-    /* color set inline */
 }
 
 .infl-predicted-badge {
@@ -1586,7 +1596,6 @@ button.class-chip--custom-inactive {
     justify-content: space-between;
     gap: 6px;
     padding-bottom: 7px;
-    /* breathing room above the bar */
 }
 
 .infl-metrics-line {
@@ -1731,7 +1740,6 @@ button.class-chip--custom-inactive {
 /* Candidate View Flash Fix */
 .candidates-panel .dash-graph {
     background-color: #1a1d17 !important;
-    /* DARK_BG */
 }
 
 /* ==========================================================

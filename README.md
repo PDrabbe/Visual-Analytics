@@ -1,455 +1,153 @@
-# ProtoNet Drawing Recognition System
+# ProtoNet Embedding Explorer — Visual Analytics Dashboard
 
-A modular, extensible **Prototypical Network** implementation for few-shot drawing recognition. Designed for visual analytics applications with hybrid learning capabilities (pre-trained base + session-based custom classes).
-
-## 🎯 Key Features
-
-### ✨ **Hybrid Learning Mode** (Recommended Starting Point)
-- **Static Base**: Pre-trained on 50-100 drawing categories (QuickDraw, etc.)
-- **Session Overlay**: Users can add custom classes with just 3-5 examples
-- **Fast Inference**: <100ms per query on CPU, <50ms on GPU
-- **Easy Upgrade Path**: Clean architecture for future online/persistent learning
-
-### 🔧 **Modular & Extensible**
-- **Swappable Encoders**: Conv4 (default), ResNet-18, EfficientNet
-- **Distance Metrics**: Euclidean, Cosine, Learnable
-- **Storage Backends**: Static, Session, Hybrid (Database ready)
-- **Meta-Learning Algorithms**: ProtoNet (MAML, Matching Networks ready)
-
-### 📊 **Built for Visual Analytics**
-- Embedding extraction for t-SNE/UMAP visualization
-- Confidence scores and top-k predictions
-- Batch inference for performance
-- Session management and export
+An interactive visual analytics dashboard for exploring and manipulating Prototypical Network (ProtoNet) embeddings trained on the Google QuickDraw dataset. Built with Dash/Plotly, it lets you inspect few-shot sketch classification in real time — drag prototypes, swap support sets, draw new sketches, and watch accuracy change live.
 
 ---
 
-## 🏗️ Architecture
+## Table of Contents
 
-```
-protonet_drawing/
-├── config/
-│   └── config.yaml              # All hyperparameters
-├── data/
-│   ├── dataset.py               # Dataset loaders (QuickDraw, custom)
-│   └── sampler.py               # N-way K-shot episodic sampler
-├── models/
-│   ├── base.py                  # Abstract interfaces (future-proof!)
-│   ├── encoder.py               # CNN encoders (Conv4, ResNet)
-│   ├── distance_metrics.py     # Distance functions
-│   ├── protonet.py              # Core ProtoNet logic
-│   └── storage.py               # Hybrid prototype storage
-├── training/
-│   └── trainer.py               # Meta-learning trainer
-├── inference/
-│   └── predictor.py             # Production API (main interface)
-├── utils/
-│   ├── visualization.py         # Plotting tools
-│   └── helpers.py               # Config, logging, etc.
-├── examples/
-│   ├── example_basic_usage.py          # Quick start
-│   └── example_visual_analytics.py     # Dashboard integration
-└── main.py                      # CLI entry point
-```
+1. [Prerequisites](#prerequisites)
+2. [Installation](#installation)
+3. [Data Setup](#data-setup)
+4. [Running the Dashboard](#running-the-dashboard)
+5. [Dashboard Features](#dashboard-features)
+6. [Troubleshooting](#troubleshooting)
 
 ---
 
-## 📦 Installation
+## Prerequisites
 
-### Requirements
-- Python 3.8+
-- PyTorch 1.10+
-- torchvision
-- NumPy, Matplotlib, seaborn
-- scikit-learn
-- PyYAML
-- tqdm
-- tensorboard (optional)
+- **Python** 3.9 or higher
+- **pip** (Python package manager)
+- **Git** (to clone the repository)
 
-### Setup
+---
+
+## Installation
+
+### 1. Clone the repository
 
 ```bash
-# Clone repository
-cd protonet_drawing
-
-# Install dependencies
-pip install torch torchvision numpy matplotlib seaborn scikit-learn pyyaml tqdm tensorboard pillow
-
-# Optional: UMAP for better visualizations
-pip install umap-learn
+git clone https://github.com/<your-username>/Visual-Analytics.git
+cd Visual-Analytics
 ```
 
----
-
-## 🚀 Quick Start
-
-### 1. **Training** (if you need a custom model)
+### 2. Create a virtual environment (recommended)
 
 ```bash
-# Edit config/config.yaml first (dataset path, hyperparameters)
-python main.py train --config config/config.yaml
+python -m venv venv
+
+# Linux / macOS
+source venv/bin/activate
+
+# Windows
+venv\Scripts\activate
 ```
 
-**Training Configuration:**
-```yaml
-data:
-  dataset: "quickdraw"
-  data_path: "data/quickdraw"
-  n_way: 5
-  n_support: 5
-  n_query: 15
-
-training:
-  num_episodes: 10000
-  learning_rate: 0.001
-```
-
-### 2. **Inference** (using pre-trained model)
-
-```python
-from protonet_drawing.inference.predictor import DrawingPredictor
-
-# Load model
-predictor = DrawingPredictor('checkpoints/best_model.pt')
-
-# Predict
-result = predictor.predict('drawing.png')
-print(f"Class: {result['class']}, Confidence: {result['confidence']:.2%}")
-```
-
-### 3. **Add Custom Classes** (Hybrid Mode - Key Feature!)
-
-```python
-# Teach a new category with 5 examples
-predictor.add_custom_class(
-    class_name="my_pet_dog",
-    examples=['dog1.png', 'dog2.png', 'dog3.png', 'dog4.png', 'dog5.png']
-)
-
-# Now predict with custom class included
-result = predictor.predict('new_dog_drawing.png')
-# → "my_pet_dog" (if similar to examples)
-```
-
----
-
-## 💡 Usage Examples
-
-### **Example 1: Basic Usage**
-
-```python
-from protonet_drawing.inference.predictor import DrawingPredictor
-
-# Initialize
-predictor = DrawingPredictor('checkpoints/best_model.pt', device='auto')
-
-# Check available classes
-classes = predictor.get_available_classes()
-print(f"Base classes: {len(classes['base'])}")
-# → 50 base classes (cat, dog, bird, ...)
-
-# Predict
-result = predictor.predict('test_drawing.png')
-print(result)
-# {
-#   'class': 'cat',
-#   'confidence': 0.94,
-#   'top_k': [
-#       {'class': 'cat', 'confidence': 0.94},
-#       {'class': 'dog', 'confidence': 0.04},
-#       {'class': 'bird', 'confidence': 0.01}
-#   ],
-#   'inference_time_ms': 45.2
-# }
-
-# Batch prediction (faster for multiple images)
-results = predictor.predict_batch(['img1.png', 'img2.png', 'img3.png'])
-```
-
-### **Example 2: Visual Analytics Integration**
-
-```python
-from protonet_drawing.inference.predictor import DrawingPredictor
-from protonet_drawing.utils.visualization import plot_embeddings_2d
-
-predictor = DrawingPredictor('checkpoints/best_model.pt')
-
-# Get embeddings for visualization
-embeddings = []
-labels = []
-
-for img_path in user_drawings:
-    embedding = predictor.get_embedding(img_path)
-    result = predictor.predict(img_path)
-    
-    embeddings.append(embedding)
-    labels.append(result['class'])
-
-# Visualize in 2D using t-SNE
-plot_embeddings_2d(
-    embeddings=np.array(embeddings),
-    labels=np.array(labels),
-    class_names=list(set(labels)),
-    method='tsne',
-    save_path='embeddings_viz.png'
-)
-```
-
-### **Example 3: Session Management**
-
-```python
-# Start session
-predictor = DrawingPredictor('checkpoints/best_model.pt')
-
-# User teaches custom categories
-predictor.add_custom_class("logo_v1", examples=[...])
-predictor.add_custom_class("logo_v2", examples=[...])
-
-# Use throughout session
-result = predictor.predict(new_drawing)
-
-# Export custom classes for later
-predictor.export_custom_classes('my_session.pt')
-
-# Clear session (keeps base classes)
-predictor.clear_custom_classes()
-```
-
----
-
-## 🔧 Configuration
-
-Key configuration options in `config/config.yaml`:
-
-```yaml
-# Model Architecture
-model:
-  encoder: "conv4"           # conv4, resnet18, efficientnet
-  embedding_dim: 512
-  distance_metric: "euclidean"  # euclidean, cosine, learnable
-
-# Storage (Hybrid Mode)
-storage:
-  backend: "hybrid"          # static, hybrid, database (future)
-  session:
-    enabled: true
-    max_custom_classes: 50
-    min_examples: 3
-
-# Inference
-inference:
-  confidence_threshold: 0.6
-  top_k: 3
-  batch_inference: true
-```
-
----
-
-## 📊 Performance Benchmarks
-
-| Metric | Value |
-|--------|-------|
-| **Inference Speed** (CPU) | 80-120ms |
-| **Inference Speed** (GPU) | 30-50ms |
-| **Batch Throughput** (GPU, batch=32) | ~500 images/sec |
-| **Model Size** (Conv4) | ~15MB |
-| **Few-shot Accuracy** (5-way 5-shot) | ~85% on QuickDraw |
-
----
-
-## 🛣️ Upgrade Path (Static → Online Learning)
-
-The architecture is designed for easy upgrades:
-
-### **Current: Hybrid Mode (Session-based)**
-- ✅ Pre-trained base classes
-- ✅ Add custom classes during session
-- ✅ In-memory prototypes (no persistence)
-
-### **Future: Persistent Online Learning**
-
-Just swap the storage backend:
-
-```python
-# In config.yaml
-storage:
-  backend: "database"  # Instead of "hybrid"
-  database:
-    type: "sqlite"
-    path: "user_prototypes.db"
-```
-
-Implementation is stubbed in `models/storage.py` - ready when you are!
-
----
-
-## 🎨 Use Cases
-
-### **1. Educational Drawing Games** (Primary Target)
-- Kids draw objects, AI provides instant feedback
-- Adaptive difficulty based on user skill
-- Custom categories for personal items (family, pets)
-
-### **2. UX/Design Prototyping**
-- Sketch wireframe components → auto-classify
-- Build personal component libraries
-- Speed up design workflows
-
-### **3. Industrial QA**
-- Hand-drawn defect sketches → categorize
-- Quick adaptation to new defect types
-- Standardized reporting
-
-### **4. Medical Documentation**
-- Anatomical diagram sketches → classify
-- Personal specialty adaptations
-- Educational tool for students
-
----
-
-## 📖 API Reference
-
-### **DrawingPredictor**
-
-Main inference interface.
-
-```python
-class DrawingPredictor:
-    def __init__(
-        model_path: str,
-        config: Optional[dict] = None,
-        device: str = 'auto',
-        max_custom_classes: int = 50
-    )
-    
-    def predict(
-        image: Union[str, Path, Image, np.ndarray],
-        return_top_k: Optional[int] = None
-    ) -> Dict
-    
-    def predict_batch(
-        images: List[...],
-        batch_size: int = 32
-    ) -> List[Dict]
-    
-    def add_custom_class(
-        class_name: str,
-        examples: List[...],
-        update_strategy: str = "replace"
-    ) -> bool
-    
-    def get_embedding(image) -> np.ndarray
-    
-    def get_available_classes() -> Dict[str, List[str]]
-    
-    def remove_custom_class(class_name: str) -> bool
-    
-    def clear_custom_classes()
-    
-    def export_custom_classes(path: str)
-```
-
----
-
-## 🔬 Technical Details
-
-### **Prototypical Networks**
-
-1. **Support Set**: N classes × K examples per class
-2. **Compute Prototypes**: Mean embedding per class
-3. **Query Classification**: Assign to nearest prototype
-
-**Advantages:**
-- Simple and interpretable
-- Few-shot learning (1-5 examples)
-- Naturally extensible (add classes anytime)
-- No retraining needed for new classes
-
-### **Distance Metrics**
-
-- **Euclidean** (default): `||q - p||²`
-- **Cosine**: `1 - cos(q, p)`
-- **Learnable**: Small MLP learns task-specific distance
-
-### **Storage Architecture**
-
-```python
-# Static: Read-only base classes
-static_store = StaticPrototypeStore('pretrained.pt')
-
-# Session: Temporary custom classes
-session_store = SessionPrototypeStore(base_store=static_store)
-
-# Hybrid: Both layers (recommended)
-hybrid_store = HybridPrototypeStore('pretrained.pt')
-```
-
----
-
-## 🧪 Testing
+### 3. Install dependencies
 
 ```bash
-# Run basic usage example
-python examples/example_basic_usage.py
+pip install -r requirements.txt
+```
 
-# Run visual analytics demo
-python examples/example_visual_analytics.py
+This installs PyTorch, Dash, Plotly, scikit-learn, UMAP, and all other required packages.
 
-# Training (requires dataset)
-python main.py train --config config/config.yaml
+---
 
-# Inference
-python main.py infer --model checkpoints/best_model.pt --image test.png
+## Data Setup
+
+The project uses the **Google QuickDraw** dataset (bitmap format). A download script is included that fetches 29 sketch classes and splits them into train/val/test sets.
+
+```bash
+python download_quickdraw.py
+```
+
+This will:
+- Download 500 samples per class from Google Cloud Storage.
+- Resize images to 64×64 pixels.
+- Save them under `data/quickdraw/{train,val,test}/<class_name>/`.
+
+The 29 classes span animals, food, vehicles, nature, objects, and geometric shapes (cat, dog, bird, fish, horse, apple, banana, cake, pizza, square, triangle, hexagon, diamond, car, bus, bicycle, truck, flower, cloud, lightning, mountain, clock, key, scissors, eyeglasses, door, table, chair, ladder).
+
+> **Note:** We are skipping the training step as it not relevant to the problem statement. The dashboard only needs the `data/quickdraw/test/` split and a trained checkpoint. We have the needed checkpoint under `checkpoints/best_model.pt`. 
+
+### Adding new classes later
+
+To download additional QuickDraw classes (that were not part of training) for few-shot evaluation:
+
+```bash
+python download_new_classes.py
+```
+
+Edit the class list at the bottom of that script to choose which new classes to fetch.
+
+---
+
+## Running the Dashboard
+
+Once you have a trained checkpoint with prototypes and test data in place, launch the dashboard:
+
+```bash
+python -m dashboard.app
+```
+
+Then open your browser at **http://localhost:8050**.
+
+On startup the dashboard will:
+1. Load the trained ProtoNet encoder from `checkpoints/best_model.pt`.
+2. Load test images from `data/quickdraw/test/` for the active classes.
+3. Compute 512-dimensional embeddings for all images.
+4. Fit a UMAP reducer to project embeddings to 2D.
+5. Render the interactive scatter plot with decision boundaries.
+
+The first launch takes 30–60 seconds (UMAP fitting). Subsequent launches restore from `session.json` if saved.
+
+### Quick-start summary
+
+```bash
+# 1. Install
+pip install -r requirements.txt
+
+# 2. Download data
+python download_quickdraw.py
+
+# 3. Launch dashboard
+python -m dashboard.app
 ```
 
 ---
 
-## 📝 TODO / Future Enhancements
+## Dashboard Features
 
-- [ ] Database backend for persistent storage (PostgreSQL, MongoDB)
-- [ ] Web API (FastAPI) for remote inference
-- [ ] Mobile deployment (ONNX, TensorFlow Lite)
-- [ ] Active learning (select best examples to label)
-- [ ] Continual learning (encoder fine-tuning)
-- [ ] Multi-modal support (text + drawing)
-- [ ] Confidence calibration
-- [ ] A/B testing framework
-
----
-
-## 📄 License
-
-MIT License - feel free to use in your projects!
+- **UMAP Embedding Scatter** — 2D projection of all sketch embeddings with topographical decision boundaries showing class territories and confidence gradients.
+- **Draggable Prototypes** — Drag ★ prototype markers to reposition them; the engine re-weights support items to match and accuracy updates instantly.
+- **Support Set Editing** — Add/remove support images per class, adjust individual weights, and see leave-one-out accuracy impact before committing.
+- **Temperature (τ) Control** — Slider to sharpen or soften the softmax classification boundary in real time.
+- **Point Inspector** — Click any query point to see its true label, prediction, confidence distribution, and top-3 high-dimensional influencers with co-activation heatmaps.
+- **Candidate Pool** — Browse all images for a class ranked by cosine similarity and competitor distance; toggle candidates in/out of the support set with projected accuracy deltas.
+- **Draw Panel** — Sketch directly on a canvas, see the drawing embedded live on the scatter plot, and add it as a support or query point.
+- **Class Management** — Toggle active classes, add new pre-trained or custom-drawn classes, and cycle per-class colors. Changes rebuild the UMAP projection.
+- **Undo / Redo** — Full action history with step-by-step rollback.
+- **Session Persistence** — Save/restore the full state (support sets, classes, colors) to `session.json`.
 
 ---
 
-## 🙏 Acknowledgments
+## Troubleshooting
 
-- Based on: Snell et al. "Prototypical Networks for Few-shot Learning" (NeurIPS 2017)
-- Dataset: Google QuickDraw Dataset
-- Inspired by: Meta-learning research community
+**`FileNotFoundError: checkpoints/best_model.pt`**
+You need to train the model first. Run `python main.py train --config config/config.yaml`, then `python generate_proto.py`.
 
----
+**`No module named 'umap'`**
+Install the UMAP package: `pip install umap-learn`.
 
-## 📧 Contact
+**Dashboard is slow to start**
+The initial UMAP fit over all test embeddings takes 30–60 seconds. This is normal. Subsequent interactions are fast because the reducer is cached.
 
-Questions? Issues? Feature requests?
+**`CUDA out of memory` during training**
+Reduce `n_way` or `n_query` in `config/config.yaml`, or set `system.device: cpu` to train on CPU.
 
-Open an issue or reach out!
+**Port 8050 already in use**
+Either stop the existing process or run with a different port: `python -m dashboard.app` and edit the `app.run(port=...)` call in `dashboard/app.py`.
 
----
-
-## 🎯 Quick Reference
-
-| Task | Command |
-|------|---------|
-| Train model | `python main.py train` |
-| Predict single image | `predictor.predict('image.png')` |
-| Add custom class | `predictor.add_custom_class(name, examples)` |
-| Batch inference | `predictor.predict_batch(images)` |
-| Get embeddings | `predictor.get_embedding(image)` |
-| Export session | `predictor.export_custom_classes(path)` |
-
----
-
-**Built with ❤️ for visual analytics applications**
+**Empty scatter plot / "No data"**
+Ensure test images exist under `data/quickdraw/test/<class_name>/` for the active classes. Run `python download_quickdraw.py` if the directory is empty.

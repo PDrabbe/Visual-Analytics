@@ -400,9 +400,7 @@ class AnalyticsEngine:
             new_labels.append(ci)
             new_image_paths.append(f)
             
-            if rel_path in excluded:
-                pass
-            else:
+            if rel_path not in excluded:
                 valid_count += 1
             if valid_count >= _MAX_PER_CLASS:
                 break
@@ -737,16 +735,10 @@ class AnalyticsEngine:
         return emb_hd, pos_2d
 
     def add_custom_image(self, cname: str, img_arr: np.ndarray, hd_emb: np.ndarray, pos_2d: np.ndarray) -> int:
-        """
-        Appends single drawn image to global matrices.
-        Returns the new global index, or -1 on error.
-        """
+        """Appends single drawn image to global matrices. Returns the new global index, or -1 on error."""
         if cname not in self.class_names:
             return -1
         ci = self.class_names.index(cname)
-        
-        from pathlib import Path
-        import time
 
         idx = len(self.images)
         self.images.append(img_arr)
@@ -1048,8 +1040,11 @@ class AnalyticsEngine:
         }
 
     def get_co_activation_images(self, q_idx: int, s_idx: int, size: int = 120) -> Tuple[str, str]:
-        """Compute spatial Dense Co-Activation Correspondence between query and support image.
-        Intercepts internal Conv4 layers to return glowing visual analytic heatmaps.
+        """Shows which spatial regions of a query-support pair the encoder activates.
+        Key use case: high accuracy can mask the encoder responding to background
+        texture instead of the actual object. This cannot be detected from metrics
+        alone; the heatmap makes such encoder failures directly inspectable.
+        Intercepts internal Conv4 layers to return heatmap overlays.
         """
         key = (q_idx, s_idx, size)
         cached = self._coact_cache.get(key)

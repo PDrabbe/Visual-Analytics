@@ -5,6 +5,7 @@ Run:  python -m dashboard.app
 
 import hashlib
 import base64
+import io
 import shutil
 import time
 import uuid
@@ -90,7 +91,6 @@ ALL_CUSTOM_DRAWING_CLASSES = AnalyticsEngine.available_custom_drawing_classes()
 
 def _get_custom_classes_from_disk() -> list:
     """Scan data directory for subfolders containing drawn_*.png."""
-    from pathlib import Path
     data_dir = Path(__file__).resolve().parent.parent / 'data' / 'quickdraw' / 'test'
     if not data_dir.exists():
         return []
@@ -154,7 +154,8 @@ app = Dash(
     title="ProtoNet Embedding Explorer",
 )
 
-app.layout = html.Div(
+def _serve_layout():
+    return html.Div(
     [
         # ── header ──────────────────────────────────────────────
         html.Div(
@@ -172,6 +173,11 @@ app.layout = html.Div(
                 html.Div(
                     [
                         html.Label("τ", className="temp-label"),
+                        # τ scales the softmax over prototype distances. Low τ = sharp boundaries,
+                        # high τ = soft. In the UMAP, lowering τ compresses decision regions toward
+                        # their prototypes and sharpens visible boundaries; raising it blurs them.
+                        # Useful for testing how robust the support configuration is to changes in
+                        # decision sharpness.
                         dcc.Slider(
                             id="temp-slider",
                             min=0.1, max=5.0, step=0.1, value=1.0,
@@ -186,6 +192,12 @@ app.layout = html.Div(
                 html.Div(
                     [
                         html.Div(id="overall-stat", className="header-stat"),
+                        dcc.Loading(
+                            id="global-loading",
+                            type="dot",
+                            color=ACCENT,
+                            children=html.Div(id="global-loading-anchor"),
+                        ),
                         html.Button(
                             "SAVE",
                             id="manual-save-btn",
@@ -381,9 +393,7 @@ app.layout = html.Div(
                         html.Div(
                             [
                                 html.Div(
-                                    [
-                                        # Moved dummy components to dummy-container to avoid unstyled white boxes
-                                    ],
+                                    [],
                                     id="inspector-panel", 
                                     className="detail-panel", 
                                     style={"display": "none"}
@@ -400,7 +410,17 @@ app.layout = html.Div(
                                     id="back-btn-wrapper",
                                     style={"display": "none", "marginBottom": "6px"},
                                 ),
-                                html.Div(id="support-panel", className="detail-panel", style={"display": "none"}),
+                                html.Div(
+                                    _render_support(
+                                        engine.class_names[0],
+                                        engine.default_support,
+                                        None,
+                                        1.0,
+                                    ),
+                                    id="support-panel",
+                                    className="detail-panel",
+                                    style={"display": "block"},
+                                ),
                                 html.Div(
                                     [
                                         html.Div(
@@ -423,7 +443,15 @@ app.layout = html.Div(
                                     style={"display": "none", "flexDirection": "column", "height": "460px"}
                                 ),
                                 html.Div(
-                                    [],
+                                    [
+                                        html.Div(
+                                            id="draw-live-confidence",
+                                            className="hint-text",
+                                            style={"textAlign": "center",
+                                                   "marginTop": "6px",
+                                                   "color": "#aaaaaa"},
+                                        ),
+                                    ],
                                     id="draw-panel",
                                     className="detail-panel draw-panel",
                                     style={"display": "none", "flexDirection": "column", "padding": "8px"}
@@ -519,7 +547,9 @@ app.layout = html.Div(
         ),
     ],
     className="root",
-)
+    )
+
+app.layout = _serve_layout
 
 
 # =====================================================================
@@ -626,11 +656,16 @@ def _mesh_cache_key(sc: dict, temp: float) -> str:
 # ── 1. Scatter + class legend + overall stat ──────────────────────
 
 
+# Projects each sketch's 512-D ProtoNet embedding into 2D so the analyst can
+# directly inspect how the model has organised the feature space. Correct
+# predictions are circles (○), misclassifications are crosses (✕), making
+# errors spatially locatable.
 @app.callback(
     Output("scatter", "figure"),
     Output("class-legend", "children"),
     Output("overall-stat", "children"),
     Output("proto-order-store", "data"),
+    Output("global-loading-anchor", "children"),
     Input("sc-store", "data"),
     Input("temp-slider", "value"),
     Input("whatif-store", "data"),
@@ -657,6 +692,10 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _
 
     # ── Decision mesh — cached by (sc, temp) so zoom/color/ghost updates
     # don't re-run the 800×800 cdist and PNG encode
+    # 2D Voronoi approximation of the ProtoNet decision boundary. Each region is
+    # coloured by its predicted class; opacity encodes softmax confidence. Makes
+    # the geometric effect of adding or removing a support sketch immediately
+    # visible as a boundary shift.
     global _mesh_cache
     _mk = _mesh_cache_key(sc, temp)
     with _engine_lock:
@@ -802,7 +841,9 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _
                 hovertemplate="%{text}<extra></extra>",
             ))
 
-    # support convex hulls (reachable region for prototype)
+    # The prototype (weighted mean of support embeddings) is always inside this hull.
+    # Shows the analyst how far the prototype star (★) can be dragged and which
+    # support sketches constrain its movement.
     for cname, items in sc.items():
         if len(items) < 2:
             continue
@@ -889,7 +930,9 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _
         )
 
 
-    # ── what-if ghost prototypes ──────────────────────────────────
+    # Ghost prototypes (☆) show where each prototype would move if the staged
+    # support change were committed, letting the analyst judge the geometric
+    # effect before making it permanent.
     whatif_res = None
     if whatif_sc:
         whatif_res = engine.classify(whatif_sc, temp)
@@ -1000,7 +1043,7 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _
                 uid="highlight-rings",
             ))
 
-    return sfig, legend_items, stat, list(order)
+    return sfig, legend_items, stat, list(order), None
 
 
 # ── 1c. Overview tab toggle ───────────────────────────────────────
@@ -1041,8 +1084,9 @@ def toggle_overview_tab(n_acc, n_conf, current):
     return tab, acc_cls, conf_cls, acc_style, conf_style, clean_hl, clean_conf
 
 
-# 1d. Confusion matrix as Plotly heatmap ───────────────────────
-
+# Complements the scatter: the scatter shows where errors are spatially, this
+# shows which classes are confused with which. Cells are row-normalised.
+# Clicking a cell highlights the matching points in the UMAP scatter.
 @app.callback(
     Output("confusion-graph", "figure"),
     Input("sc-store",           "data"),
@@ -1092,9 +1136,7 @@ def render_confusion_matrix(sc, temp, color_map, _ev, sel_q, conf_sel):
         if pc in order: group_col = order.index(pc)
 
     # Build custom colour: green on diagonal, red off-diagonal, intensity = fraction
-    # Plotly heatmap only takes a single z matrix so we pass cm_norm and
-    # use a custom colorscale per cell via annotation text + shapes.
-    # Simpler: separate diagonal and off-diagonal into two overlaid heatmaps.
+    # Plotly heatmap uses a single z matrix; we use shapes for selection highlights.
 
     # Hover text
     hover = []
@@ -1267,15 +1309,6 @@ _SEL_TRACE_ID = "selection-ring"
 )
 def update_selection_ring(sel_q, current_fig):
     p = Patch()
-    # Remove any existing ring traces by rebuilding the data list without them.
-    # Patch supports item-level list mutations via p["data"] index assignment.
-    # Simpler: append the ring at a known position and overwrite it.
-    # Clearing old rings requires knowing their index; instead we embed a uid.
-    # Cleanest approach: use allow_duplicate and rebuild just the ring element
-    # by comparing existing traces. Since Patch doesn't support list filtering,
-    # we do a targeted no_update when nothing changed and let update_scatter
-    # handle ring removal when sc changes (ring naturally disappears since
-    # update_scatter no longer adds it and figure is replaced wholesale).
     if sel_q is not None and sel_q < len(engine.labels):
         ring = go.Scatter(
             x=[engine.embeddings_2d[sel_q, 0]],
@@ -1429,7 +1462,6 @@ def scatter_click(click, sc, mode):
     if idx is None:
         return None, None, no_update, no_update, no_update, no_update
 
-    # Safety check for image indexing
     if not (0 <= idx < len(engine.labels)):
         return no_update, no_update, no_update, no_update, no_update, no_update
 
@@ -1764,7 +1796,6 @@ def render_detail_panels_callback(sel_q, sc, temp, sel_class, sel_sup,
 
 def _render_inspector(sel_q, sc, temp, whatif_sc=None, infl_filter=None):
     infl_filter = infl_filter or {}
-    # Fixed to top 5 as per user request
     top_n = 5
     cls_filter = infl_filter.get("cls", "all")
     why_mode = infl_filter.get("mode", "all")
@@ -1850,10 +1881,11 @@ def _render_inspector(sel_q, sc, temp, whatif_sc=None, infl_filter=None):
                 )
             )
 
-    # ── NEAREST SUPPORT SKETCHES ─────────────────────────────────────────
-    # Shows sketch-level Euclidean distance alongside class prototype distance.
-    # These are two distinct signals: dist ranks individual sketches,
-    # proto dist determines the actual prediction.
+    # Two distances are shown per sketch:
+    #   sketch dist: distance to the individual support image (visual similarity).
+    #   proto dist:  distance to the class prototype (what drives the prediction).
+    # These are different signals: a query can be close to one support sketch
+    # yet far from the prototype, which explains many wrong predictions.
     query_hd = engine.embeddings_hd[idx]
 
     # Collect all (dist, sketch_idx, class_name, class_color, proto_dist)
@@ -2505,12 +2537,9 @@ def _render_support(sel_class, sc, sel_sup, temp,
     )
 
     items = list(sc.get(sel_class, []))
-    logger.debug("[_render_support] Class: %s, base items: %d", sel_class, len(items))
     if whatif_sc:
         staged_items = whatif_sc.get(sel_class, [])
-        logger.debug("[_render_support] Staged items for %s: %s", sel_class, [it.get('idx') for it in staged_items])
         drawn_items = [it for it in staged_items if isinstance(it.get("idx"), str) and it["idx"].startswith("drawn_")]
-        logger.debug("[_render_support] Appending %d drawn items", len(drawn_items))
         items.extend(drawn_items)
 
     if not items:
@@ -2608,7 +2637,9 @@ def _render_support(sel_class, sc, sel_sup, temp,
         is_pending_rm = (pending_rm == idx)
 
         d = diag_by_idx.get(idx, {})
-        # Use background-computed delta if available
+        # Leave-one-out accuracy delta: how much overall accuracy changes if this
+        # sketch is removed. Negative = helps; positive = hurts. One of three signals
+        # shown alongside distance-to-prototype and distance-to-competitor.
         loo = sup_deltas.get(str(idx))
         dist_val = d.get("dist", 0.0)
         comp = d.get("competitor_name", "")
@@ -3019,9 +3050,7 @@ def _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view
     new_undo = (list(undo_stack or []) + [{"desc": label, "sc": sc, "classes": classes, "colors": colors}])[-_MAX_UNDO:]
     new_view_id = (view_id or 0) + 1
 
-    # Persist session (DISABLED AUTOSAVE)
     engine.default_support = whatif_sc
-    # engine.save_session(_SESSION_PATH, {"sc": whatif_sc, "classes": classes, "colors": colors})
 
     return whatif_sc, new_undo, [], None, new_log, new_view_id
 
@@ -3114,10 +3143,6 @@ def cancel_add(clicks):
     return None
 
 
-# ── 17. Changelog display ────────────────────────────────────────
-
-
-
 # ── P4-1. Class config label (shows N/total, click to expand) ────
 
 
@@ -3166,10 +3191,7 @@ def _resolve_color(cname: str, active_list: list, color_map: dict) -> str:
     """Return the hex color for cname, respecting overrides in color_map."""
     if cname in color_map:
         return CLASS_COLORS[color_map[cname] % len(CLASS_COLORS)]
-    if cname in active_list:
-        idx = active_list.index(cname)
-    else:
-        idx = sorted(active_list).index(cname) if cname in active_list else 0
+    idx = active_list.index(cname) if cname in active_list else 0
     return CLASS_COLORS[idx % len(CLASS_COLORS)]
 
 
@@ -3511,6 +3533,7 @@ def apply_class_changes(n, active, pending, sc, colors, sel_class, undo_stack):
     Output("color-map-store", "data", allow_duplicate=True),
     Output("master-undo-store", "data", allow_duplicate=True),
     Output("master-redo-store", "data", allow_duplicate=True),
+    Output("save-indicator", "children", allow_duplicate=True),
     Input({"type": "color-swatch-btn", "name": ALL}, "n_clicks"),
     State({"type": "color-swatch-btn", "name": ALL}, "id"),
     State("sc-store", "data"),
@@ -3831,13 +3854,16 @@ def import_custom_class(n_list, source_folder, assign_name_list, active, sc, col
     if name not in existing_custom:
         existing_custom.append(name)
 
-    # Persist session (DISABLED AUTOSAVE)
     engine.default_support = new_sc
 
     return (new_active, new_pending, new_sc, options, new_sel,
             existing_custom, None, "support", undo_stack, [], "● UNSAVED")
 
 
+# X-axis: distance to own prototype. Y-axis: distance to nearest competitor.
+# Supports support-set curation, but note that sketches spread across the
+# cluster often outperform those clustered near the prototype, as visible in
+# the UMAP. Use both views together before committing a change.
 @app.callback(
     Output("candidate-scatter", "figure"),
     Input("class-selector",    "value"),
@@ -4259,9 +4285,6 @@ def toggle_draw_interval(mode):
     return mode != "draw"
 
 
-import base64
-from io import BytesIO
-
 @app.callback(
     Output("drawing-ghost-store", "data"),
     Output("draw-live-confidence", "children"),
@@ -4305,8 +4328,6 @@ def process_draw_strokes(data_url, sc, temp, active_class):
     except Exception:
         raise PreventUpdate
 
-# toggle_new_class_controls was merged into render_detail_panels_callback
-# but needs to be standalone to react to dropdown changes in real-time
 @app.callback(
     Output("new-class-controls", "style", allow_duplicate=True),
     Output("add-query-btn",      "style", allow_duplicate=True),
@@ -4594,7 +4615,6 @@ def update_highlight_rings(idxs, sel_sup, sel_q, current_fig):
     if sel_q is not None and isinstance(sel_q, int):
         combined_idxs.append(sel_q)
 
-    # Unique valid indices
     combined_idxs = list(set(combined_idxs))
     valid_idxs = [i for i in combined_idxs if i < len(engine.embeddings_2d)]
 
