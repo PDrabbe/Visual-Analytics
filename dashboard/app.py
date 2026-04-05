@@ -487,7 +487,7 @@ def _serve_layout():
         dcc.Store(id="changelog-store",     data=[]),
         dcc.Store(id="active-classes-store",  data=list(engine.class_names)),
         dcc.Store(id="pending-classes-store",  data=list(engine.class_names)),
-        dcc.Store(id="color-map-store",        data={}),
+        dcc.Store(id="color-map-store",        data=_saved_colors),
         dcc.Store(id="session-saved-store",    data=False),
         dcc.Store(id="uirev-store",            data=0),
         dcc.Store(id="sidebar-mode-store",     data="support"),
@@ -3931,8 +3931,14 @@ def render_candidate_scatter(sel_class, sc, delta_cache, whatif_sc, sel_q, hl_id
             state_txt = "Candidate"
 
         d = delta_cache.get(str(idx)) if delta_cache else None
-        d_text = f"{d:+.1%}" if d is not None else "computing..."
-        texts.append(f"#{idx}<br>State: {state_txt}<br>dist to prototype: {c['dist']:.2f}<br>comp dist: {c['competitor_dist']:.1f}<br>delta: {d_text}")
+        if d is None:
+            d_text = "computing..."
+        elif isinstance(d, dict):
+            affected = f"  {d['most_affected_cls']} {d['most_affected_val']:+.1%}" if d['most_affected_cls'] else ""
+            d_text = f"overall {d['overall']:+.1%}{affected}"
+        else:
+            d_text = f"{d:+.1%}"  # backwards compat for any cached floats from before the change
+        texts.append(f"#{idx}<br>State: {state_txt}<br>dist to prototype: {c['dist']:.2f}<br>comp dist: {c['competitor_dist']:.1f}<br>{d_text}")
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(

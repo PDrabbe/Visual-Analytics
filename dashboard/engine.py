@@ -701,18 +701,28 @@ class AnalyticsEngine:
 
         return results
 
-    def candidate_add_delta(self, cname: str, cand_idx: int, sc: Dict, temp: float = 1.0) -> float:
-        """
-        Runs one trial classify with cand_idx added, returns accuracy delta
-        """
-        base_res = self.classify(sc, temp)
-        base_acc = base_res["overall"]
-
-        trial_sc = {c: list(v) for c, v in sc.items()}
+    def candidate_add_delta(self, cname: str, cand_idx: int, sc: Dict, temp: float = 1.0) -> dict:
+        base_res  = self.classify(sc, temp)
+        trial_sc  = {c: list(v) for c, v in sc.items()}
         trial_sc[cname] = trial_sc.get(cname, []) + [{"idx": cand_idx, "weight": 1.0}]
-
         trial_res = self.classify(trial_sc, temp)
-        return float(trial_res["overall"] - base_acc)
+
+        overall_delta = float(trial_res["overall"] - base_res["overall"])
+
+        # Per-class deltas for all OTHER classes
+        other_deltas = {
+            cn: float(trial_res["accs"].get(cn, 0.0) - base_res["accs"].get(cn, 0.0))
+            for cn in base_res["accs"]
+            if cn != cname
+        }
+        # Most affected other class (largest absolute change)
+        most_affected = max(other_deltas, key=lambda cn: abs(other_deltas[cn])) if other_deltas else None
+
+        return {
+            "overall":           overall_delta,
+            "most_affected_cls": most_affected,
+            "most_affected_val": other_deltas[most_affected] if most_affected else 0.0,
+        }
 
     # ------------------------------------------------------------------
     # Image helpers
@@ -870,9 +880,9 @@ class AnalyticsEngine:
 
         nc = len(order)
         cm = np.zeros((nc, nc), dtype=float)
-        for t, prob_vec in zip(true_idx, probs):
+        for t, p in zip(true_idx, preds):
             if t >= 0:
-                cm[t] += prob_vec
+                cm[t, p] += 1.0
 
         accs = {}
         for i, cn in enumerate(order):
