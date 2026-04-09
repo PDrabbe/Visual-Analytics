@@ -1,6 +1,7 @@
 import numpy as np
 from PIL import Image
 import io
+import uuid
 import shutil
 import json
 import base64
@@ -76,16 +77,18 @@ class AnalyticsEngine:
     # Initialisation — loads real model, images, computes embeddings
     # ------------------------------------------------------------------
 
-    def init_demo(self, active_classes: Optional[List[str]] = None
-                  ) -> "AnalyticsEngine":
+    def init_demo(self, active_classes: Optional[List[str]] = None,
+                  loaded_embeddings_2d: Optional[List[List[float]]] = None) -> "AnalyticsEngine":
         """Load real model & QuickDraw data, compute embeddings, run UMAP.
 
         If *active_classes* is provided it overrides CLASS_NAMES.
         """
         if active_classes:
             self.class_names = [c for c in active_classes if (_DATA_DIR / c).exists()]
-            self.n_classes = len(self.class_names)
-            self.class_colors = list(CLASS_COLORS[:self.n_classes])
+        
+        self.n_classes = len(self.class_names)
+        self.class_colors = list(CLASS_COLORS[:self.n_classes])
+
         import torch
         import torchvision.transforms as T
         from models.encoder import get_encoder
@@ -105,21 +108,14 @@ class AnalyticsEngine:
                 },
             },
         )
-        # Extract encoder weights from the full ProtoNet state dict
         if 'model_state_dict' in cp:
-            sd = {
-                k.replace('encoder.', '', 1): v
-                for k, v in cp['model_state_dict'].items()
-                if k.startswith('encoder.')
-            }
+            sd = {k.replace('encoder.', '', 1): v for k, v in cp['model_state_dict'].items() if k.startswith('encoder.')}
             encoder.load_state_dict(sd, strict=True)
         elif 'encoder_state_dict' in cp:
             encoder.load_state_dict(cp['encoder_state_dict'])
         encoder.eval()
 
-        # Persist encoder and transform for later inference (drawn sketches)
         self._encoder = encoder
-
         transform = T.Compose([
             T.Resize((64, 64)),
             T.ToTensor(),
@@ -128,71 +124,63 @@ class AnalyticsEngine:
         self._transform = transform
 
         # ── load images ──────────────────────────────────────────
-        self.images = []
-        labels: List[int] = []
-        self.image_paths = []
+        self.images: List[np.ndarray] = []
+        self.labels: np.ndarray = np.array([], dtype=int)
+        self.image_paths: List[str] = []
         self.excluded_indices = set()
 
-        # Load excluded images
-        excluded = set()
         if _EXCLUDED_PATH.exists():
             try:
                 with open(_EXCLUDED_PATH) as f:
-                    excluded = set(json.load(f))
-            except Exception as e:
-                logger.warning("Failed to load excluded images: %s", e)
+                    self.excluded_indices = set(json.load(f))
+            except Exception: pass
 
+        n = 0
         for ci, cname in enumerate(self.class_names):
             cls_dir = _DATA_DIR / cname
-            if not cls_dir.exists():
-                logger.warning("Class directory not found: %s", cls_dir)
-                continue
+            if not cls_dir.exists(): continue
             img_files = sorted(cls_dir.glob('*.png'))
             valid_count = 0
             for f in img_files:
-                rel_path = str(f.relative_to(_DATA_DIR))
-                arr = np.array(Image.open(f).convert('L'))
-                self.images.append(arr)
-                labels.append(ci)
+                name = str(f.relative_to(_DATA_DIR))
+                self.images.append(np.array(Image.open(f).convert('L')))
+                self.labels = np.append(self.labels, ci)
                 self.image_paths.append(f)
-                
-                if rel_path in excluded:
-                    self.excluded_indices.add(len(self.images) - 1)
-                else:
+                if name not in self.excluded_indices:
                     valid_count += 1
-                    
+                n += 1
                 if valid_count >= _MAX_PER_CLASS:
                     break
 
-        self.labels = np.array(labels, dtype=int)
-        n = len(self.images)
         logger.info("Loaded %d images across %d classes", n, self.n_classes)
 
-        # ── compute embeddings with real encoder ──────────────────
+        # ── compute embeddings ──────────────────
         all_embs: List[np.ndarray] = []
         batch_size = 64
         with torch.no_grad():
             for i in range(0, n, batch_size):
                 batch_imgs = self.images[i:i + batch_size]
-                tensors = torch.stack([
-                    transform(Image.fromarray(img.astype(np.uint8), mode='L'))
-                    for img in batch_imgs
-                ])
-                embs = encoder(tensors)           # (B, 512)
+                tensors = torch.stack([transform(Image.fromarray(img.astype(np.uint8), mode='L')) for img in batch_imgs])
+                embs = encoder(tensors)
                 all_embs.append(embs.cpu().numpy())
 
         self.embeddings_hd = np.concatenate(all_embs, axis=0)
 
-        # ── UMAP / t-SNE for 2-D scatter ────────────────────────
-        self._compute_umap()
+        # ── UMAP ────────────────────────
+        if loaded_embeddings_2d is not None and len(loaded_embeddings_2d) == n:
+            logger.info("Applying saved layout from session.")
+            self.embeddings_2d = np.array(loaded_embeddings_2d)
+            from scipy.spatial import cKDTree
+            self._kd_tree = cKDTree(self.embeddings_2d)
+            self._umap_reducer = None
+        else:
+            self._compute_umap()
 
-        # ── default support set (first K per class) ──────────────
+        # ── default support set ──────────────
         self.default_support = {}
         for ci, cname in enumerate(self.class_names):
             idxs = np.where(self.labels == ci)[0][:_INITIAL_SUPPORT].tolist()
-            self.default_support[cname] = [
-                {'idx': idx, 'weight': 1.0} for idx in idxs
-            ]
+            self.default_support[cname] = [{'idx': idx, 'weight': 1.0} for idx in idxs]
 
         return self
 
@@ -220,6 +208,21 @@ class AnalyticsEngine:
     # ------------------------------------------------------------------
     # Persistence — session
     # ------------------------------------------------------------------
+
+    def save_excluded(self) -> None:
+        """Persist the current excluded_indices set to excluded_images.json."""
+        try:
+            paths = []
+            for i in self.excluded_indices:
+                if i < len(self.image_paths):
+                    try:
+                        paths.append(str(self.image_paths[i].relative_to(_DATA_DIR)))
+                    except ValueError:
+                        pass
+            with open(_EXCLUDED_PATH, 'w') as f:
+                json.dump(paths, f)
+        except Exception as e:
+            logger.warning("save_excluded failed: %s", e)
 
     def save_session(self, path: str, state: Dict) -> None:
         """Serialize central application state to disk."""
@@ -397,9 +400,7 @@ class AnalyticsEngine:
             new_labels.append(ci)
             new_image_paths.append(f)
             
-            if rel_path in excluded:
-                pass
-            else:
+            if rel_path not in excluded:
                 valid_count += 1
             if valid_count >= _MAX_PER_CLASS:
                 break
@@ -557,6 +558,7 @@ class AnalyticsEngine:
         cname: str,
         sc: Dict,
         temperature: float = 1.0,
+        fast: bool = False,
     ) -> List[Dict]:
         """
         Compute diagnostics for every support image of *cname*.
@@ -567,7 +569,7 @@ class AnalyticsEngine:
                 "idx":        int,       # image index
                 "loo_delta":  float,     # overall-accuracy change when this
                                          #   image is removed  (negative = hurts)
-                "cos_sim":    float,     # cosine similarity to own prototype
+                "dist":       float,     # Euclidean distance to own prototype
                                          #   (computed *with* this image included)
                 "competitor_dist": float, # euclidean distance to nearest
                                          #   competing prototype
@@ -582,11 +584,11 @@ class AnalyticsEngine:
         base_res = self.classify(sc, temperature)
         base_acc = base_res["overall"]
 
-        # Current prototypes (HD) — needed for cos-sim and competitor dist
+        # Current prototypes (HD) — needed for own and competitor Euclidean distances
         _, phd, order = self.compute_prototypes(sc)
         if cname not in order:
             return [{"idx": it["idx"], "loo_delta": 0.0,
-                     "cos_sim": 0.0, "competitor_dist": 0.0,
+                     "dist": 0.0, "competitor_dist": 0.0,
                      "competitor_name": ""} for it in items]
 
         ci = order.index(cname)
@@ -602,13 +604,8 @@ class AnalyticsEngine:
             idx = item["idx"]
             emb = self.embeddings_hd[idx]                    # (512,)
 
-            # ── cosine similarity to own prototype ────────────
-            norm_e = np.linalg.norm(emb)
-            norm_p = np.linalg.norm(own_proto)
-            if norm_e > 1e-9 and norm_p > 1e-9:
-                cos = float(np.dot(emb, own_proto) / (norm_e * norm_p))
-            else:
-                cos = 0.0
+            # ── Euclidean distance to own prototype ────────────
+            dist = float(np.sqrt(((emb - own_proto) ** 2).sum()))
 
             # ── distance to nearest competing prototype ───────
             if len(other_protos) > 0:
@@ -622,7 +619,9 @@ class AnalyticsEngine:
                 comp_name = ""
 
             # ── leave-one-out accuracy delta ──────────────────
-            if len(items) <= 1:
+            if fast:
+                loo_delta = None
+            elif len(items) <= 1:
                 # Can't remove the only support image — delta undefined
                 loo_delta = 0.0
             else:
@@ -635,17 +634,37 @@ class AnalyticsEngine:
             results.append({
                 "idx": idx,
                 "loo_delta": loo_delta,
-                "cos_sim": cos,
+                "dist": dist,
                 "competitor_dist": comp_dist,
                 "competitor_name": comp_name,
             })
 
         return results
 
+    def support_loo_delta(self, cname: str, idx: int, sc: Dict, temp: float = 1.0) -> float:
+        """
+        Compute LOO delta for a single support image.
+        """
+        items = sc.get(cname, [])
+        if len(items) <= 1:
+            return 0.0
+
+        base_res = self.classify(sc, temp)
+        base_acc = base_res["overall"]
+
+        loo_sc = {c: list(v) for c, v in sc.items()}
+        loo_sc[cname] = [it for it in loo_sc[cname] if it["idx"] != idx]
+        
+        loo_res = self.classify(loo_sc, temp)
+        return float(loo_res["overall"] - base_acc)
+
     def class_images_pool(self, cname: str, sc: Dict) -> List[Dict]:
         """
         Returns ALL images of cname with:
-        {idx, cos_sim, comp_dist, is_support}
+        {idx, dist, competitor_dist, is_support}
+
+        dist             — Euclidean distance to own prototype (lower = better candidate)
+        competitor_dist  — Euclidean distance to nearest competitor prototype (higher = better)
         """
         _, phd, order = self.compute_prototypes(sc)
         if cname not in order:
@@ -664,12 +683,8 @@ class AnalyticsEngine:
         for idx in all_idxs:
             emb = self.embeddings_hd[idx]
 
-            norm_e = np.linalg.norm(emb)
-            norm_p = np.linalg.norm(own_proto)
-            if norm_e > 1e-9 and norm_p > 1e-9:
-                cos = float(np.dot(emb, own_proto) / (norm_e * norm_p))
-            else:
-                cos = 0.0
+            # Euclidean distance to own prototype
+            dist = float(np.sqrt(((emb - own_proto) ** 2).sum()))
 
             if len(other_protos) > 0:
                 dists_to_others = np.linalg.norm(other_protos - emb[None, :], axis=1)
@@ -679,25 +694,35 @@ class AnalyticsEngine:
 
             results.append({
                 "idx": int(idx),
-                "cos_sim": cos,
+                "dist": dist,
                 "competitor_dist": comp_dist,
                 "is_support": int(idx) in sc_idxs
             })
 
         return results
 
-    def candidate_add_delta(self, cname: str, cand_idx: int, sc: Dict, temp: float = 1.0) -> float:
-        """
-        Runs one trial classify with cand_idx added, returns accuracy delta
-        """
-        base_res = self.classify(sc, temp)
-        base_acc = base_res["overall"]
-
-        trial_sc = {c: list(v) for c, v in sc.items()}
+    def candidate_add_delta(self, cname: str, cand_idx: int, sc: Dict, temp: float = 1.0) -> dict:
+        base_res  = self.classify(sc, temp)
+        trial_sc  = {c: list(v) for c, v in sc.items()}
         trial_sc[cname] = trial_sc.get(cname, []) + [{"idx": cand_idx, "weight": 1.0}]
-
         trial_res = self.classify(trial_sc, temp)
-        return float(trial_res["overall"] - base_acc)
+
+        overall_delta = float(trial_res["overall"] - base_res["overall"])
+
+        # Per-class deltas for all OTHER classes
+        other_deltas = {
+            cn: float(trial_res["accs"].get(cn, 0.0) - base_res["accs"].get(cn, 0.0))
+            for cn in base_res["accs"]
+            if cn != cname
+        }
+        # Most affected other class (largest absolute change)
+        most_affected = max(other_deltas, key=lambda cn: abs(other_deltas[cn])) if other_deltas else None
+
+        return {
+            "overall":           overall_delta,
+            "most_affected_cls": most_affected,
+            "most_affected_val": other_deltas[most_affected] if most_affected else 0.0,
+        }
 
     # ------------------------------------------------------------------
     # Image helpers
@@ -720,16 +745,10 @@ class AnalyticsEngine:
         return emb_hd, pos_2d
 
     def add_custom_image(self, cname: str, img_arr: np.ndarray, hd_emb: np.ndarray, pos_2d: np.ndarray) -> int:
-        """
-        Appends single drawn image to global matrices.
-        Returns the new global index, or -1 on error.
-        """
+        """Appends single drawn image to global matrices. Returns the new global index, or -1 on error."""
         if cname not in self.class_names:
             return -1
         ci = self.class_names.index(cname)
-        
-        from pathlib import Path
-        import time
 
         idx = len(self.images)
         self.images.append(img_arr)
@@ -738,7 +757,7 @@ class AnalyticsEngine:
         self.embeddings_2d = np.vstack([self.embeddings_2d, pos_2d.reshape(1, -1)])
         
         if hasattr(self, 'image_paths'):
-            self.image_paths.append(Path(f"drawings/{cname}/{int(time.time())}.png"))
+            self.image_paths.append(Path(f"drawings/{cname}/{uuid.uuid4().hex[:8]}.png"))
             
         from scipy.spatial import cKDTree
         self._kd_tree = cKDTree(self.embeddings_2d)
@@ -861,9 +880,9 @@ class AnalyticsEngine:
 
         nc = len(order)
         cm = np.zeros((nc, nc), dtype=float)
-        for t, prob_vec in zip(true_idx, probs):
+        for t, p in zip(true_idx, preds):
             if t >= 0:
-                cm[t] += prob_vec
+                cm[t, p] += 1.0
 
         accs = {}
         for i, cn in enumerate(order):
@@ -1031,8 +1050,11 @@ class AnalyticsEngine:
         }
 
     def get_co_activation_images(self, q_idx: int, s_idx: int, size: int = 120) -> Tuple[str, str]:
-        """Compute spatial Dense Co-Activation Correspondence between query and support image.
-        Intercepts internal Conv4 layers to return glowing visual analytic heatmaps.
+        """Shows which spatial regions of a query-support pair the encoder activates.
+        Key use case: high accuracy can mask the encoder responding to background
+        texture instead of the actual object. This cannot be detected from metrics
+        alone; the heatmap makes such encoder failures directly inspectable.
+        Intercepts internal Conv4 layers to return heatmap overlays.
         """
         key = (q_idx, s_idx, size)
         cached = self._coact_cache.get(key)

@@ -1,0 +1,76 @@
+{
+    "sc": {
+        "dog": [
+            {
+                "idx": 124,
+                "weight": 1.0
+            },
+            {
+                "idx": 125,
+                "weight": 1.0
+            },
+            {
+                "idx": 126,
+                "weight": 1.0
+            },
+            {
+                "idx": 127,
+                "weight": 1.0
+            },
+            {
+                "idx": 128,
+                "weight": 1.0
+            }
+        ],
+        "clock": [
+            {
+                "idx": 84,
+                "weight": 1.0
+            },
+            {
+                "idx": 85,
+                "weight": 1.0
+            },
+            {
+                "idx": 86,
+                "weight": 1.0
+            },
+            {
+                "idx": 87,
+                "weight": 1.0
+            },
+            {
+                "idx": 88,
+                "weight": 1.0
+            }
+        ],
+        "flower": [
+            {
+                "idx": 250,
+                "weight": 1.0
+            },
+            {
+                "idx": 251,
+                "weight": 1.0
+            },
+            {
+                "idx": 252,
+                "weight": 1.0
+            },
+            {
+                "idx": 253,
+                "weight": 1.0
+            },
+            {
+                "idx": 254,
+                "weight": 1.0
+            }
+        ]
+    },
+    "classes": [
+        "dog",
+        "clock",
+        "flower"
+    ],
+    "colors": {}
+}
