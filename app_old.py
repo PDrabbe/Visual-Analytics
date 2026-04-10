@@ -44,7 +44,6 @@ _saved_session = _engine_tmp.load_session(_SESSION_PATH) or {}
 _saved_classes = _saved_session.get("classes")
 _saved_sc = _saved_session.get("sc", _saved_session.get("default_support", {}))
 _saved_colors = _saved_session.get("colors", {})
-_saved_excluded = _saved_session.get("excluded")
 
 is_worker = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
 is_main_file = __name__ == "__main__"
@@ -55,8 +54,6 @@ if not is_main_file or is_worker:
     init_classes = _saved_session.get("classes")
     init_layout = _saved_session.get("embeddings_2d")
     engine = _engine_tmp.init_demo(active_classes=init_classes, loaded_embeddings_2d=init_layout)
-    if _saved_excluded is not None:
-        engine.excluded_indices = set(_saved_excluded)
 
     logger.info("Ready — %d sketches, %d classes", len(engine.images), engine.n_classes)
 
@@ -207,13 +204,6 @@ def _serve_layout():
                             className="btn-small",
                             n_clicks=0,
                             title="Save session to disk",
-                        ),
-                        html.Button(
-                            "RELOAD",
-                            id="recompute-embed-btn",
-                            className="btn-small",
-                            n_clicks=0,
-                            title="Force full embedding recalculation",
                         ),
                         html.Span(id="save-indicator",
                                   className="save-indicator"),
@@ -453,12 +443,15 @@ def _serve_layout():
                                     style={"display": "none", "flexDirection": "column", "height": "460px"}
                                 ),
                                 html.Div(
-                                    _render_canvas_tool(
-                                        engine.class_names[0],
-                                        engine.default_support,
-                                        None,
-                                        "",
-                                    ),
+                                    [
+                                        html.Div(
+                                            id="draw-live-confidence",
+                                            className="hint-text",
+                                            style={"textAlign": "center",
+                                                   "marginTop": "6px",
+                                                   "color": "#aaaaaa"},
+                                        ),
+                                    ],
                                     id="draw-panel",
                                     className="detail-panel draw-panel",
                                     style={"display": "none", "flexDirection": "column", "padding": "8px"}
@@ -637,17 +630,6 @@ app.clientside_callback(
     ],
 )
 
-
-@app.callback(
-    Output("engine-version-store", "data", allow_duplicate=True),
-    Input("sidebar-mode-store", "data"),
-    State("engine-version-store", "data"),
-    prevent_initial_call=True,
-)
-def refit_umap_when_entering_draw(mode, engine_ver):
-    """Mode switches must not trigger expensive embedding recomputation."""
-    raise PreventUpdate
-
 # =====================================================================
 # Decision-mesh cache — reused when sc and temp haven't changed.
 # Avoids 800×800 cdist + PNG re-encode on selection clicks, ghost
@@ -691,15 +673,13 @@ def _mesh_cache_key(sc: dict, temp: float) -> str:
     Input("drawing-ghost-store", "data"),
     Input({"type": "assign-class-dropdown", "index": ALL}, "value"),
     Input("engine-version-store", "data"),
-    Input("sidebar-mode-store", "data"),
     State("sel-query-store", "data"),
     State("highlight-store", "data"),
     State("master-view-id", "data"),
 )
-def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _engine_ver, sidebar_mode, sel_q, hl_idxs, uirev):
+def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _engine_ver, sel_q, hl_idxs, uirev):
     color_map = color_map or {}
     active_class = next((v for v in (_class_vals or []) if v and v != "CREATE_NEW"), None)
-    is_draw_open = sidebar_mode == "draw"
 
     res = engine.classify(sc, temp)
     order = res["order"]
@@ -923,7 +903,7 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _
         )
 
     # ── Drawing Ghost Sketch ───────────────────────────────────────
-    if is_draw_open and drawing_ghost and "pos2d" in drawing_ghost:
+    if drawing_ghost and "pos2d" in drawing_ghost:
         sfig.add_trace(
             go.Scatter(
                 x=[drawing_ghost["pos2d"][0]],
@@ -966,7 +946,7 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _
     if whatif_sc:
         whatif_res = engine.classify(whatif_sc, temp)
         w_p2d, _, w_order = engine.compute_prototypes(whatif_sc)
-    elif is_draw_open and drawing_ghost and "hd" in drawing_ghost and active_class:
+    elif drawing_ghost and "hd" in drawing_ghost and active_class:
         temp_sc = {c: list(v) for c, v in sc.items()}
         class_items = temp_sc.setdefault(active_class, [])
         class_items.append({
@@ -1046,10 +1026,9 @@ def update_scatter(sc, temp, whatif_sc, color_map, drawing_ghost, _class_vals, _
         )
 
     # ── Persistent Highlight Rings (for cases where full figure rebuilds) ──
-    # Only confusion-matrix group highlights (highlight-store) get white rings here.
-    # Per-point selection rings (sel-query → red, sel-support → amber) are applied
-    # via lightweight Patch callbacks and must NOT be duplicated here.
+    # This prevents the "momentary highlight" bug.
     combined_hl = set()
+    if sel_q is not None: combined_hl.add(sel_q)
     if hl_idxs:
         if isinstance(hl_idxs, (int, str)):
             try: combined_hl.add(int(hl_idxs))
@@ -1125,9 +1104,8 @@ def toggle_overview_tab(n_acc, n_conf, current):
     Input("engine-version-store", "data"),
     Input("sel-query-store",    "data"),
     Input("conf-selection-store", "data"),
-    Input("sel-support-store",  "data"),
 )
-def render_confusion_matrix(sc, temp, color_map, _ev, sel_q, conf_sel, sel_sup):
+def render_confusion_matrix(sc, temp, color_map, _ev, sel_q, conf_sel):
     color_map = color_map or {}
     res   = engine.classify(sc, temp)
     order = res["order"]
@@ -1147,14 +1125,10 @@ def render_confusion_matrix(sc, temp, color_map, _ev, sel_q, conf_sel, sel_sup):
     row_totals = cm.sum(axis=1, keepdims=True).clip(min=1)
     cm_norm    = cm / row_totals   # fraction
 
-    # Highlight selected point (query or support) in the confusion matrix.
-    # sel-query-store is the single shared selection — set by any interaction
-    # (scatter click, thumbnail click, support diamond click).
-    # sel-support-store is a fallback for legacy paths that may still set it.
+    # Highlight selected query's true + predicted class
     hl_row = hl_col = -1
-    active_qi = sel_q if sel_q is not None else sel_sup
-    if active_qi is not None:
-        qi = int(active_qi)
+    if sel_q is not None:
+        qi = int(sel_q)
         if qi < len(engine.labels):
             tc = engine.class_names[engine.labels[qi]]
             if tc in order:
@@ -1284,8 +1258,6 @@ def render_confusion_matrix(sc, temp, color_map, _ev, sel_q, conf_sel, sel_sup):
 @app.callback(
     Output("highlight-store",       "data", allow_duplicate=True),
     Output("conf-selection-store",  "data", allow_duplicate=True),
-    Output("sel-query-store",       "data", allow_duplicate=True),
-    Output("sel-support-store",     "data", allow_duplicate=True),
     Input("confusion-graph",  "clickData"),
     State("sc-store",         "data"),
     State("temp-slider",      "value"),
@@ -1295,7 +1267,6 @@ def render_confusion_matrix(sc, temp, color_map, _ev, sel_q, conf_sel, sel_sup):
 def highlight_confusion_cell(click, sc, temp, current_sel):
     """Clicking a cell (true, pred) highlights all matching query points.
     Clicking the same cell again clears the highlight.
-    When activating, clears any single-point selection rings (mutual exclusivity).
     """
     if not click or not click.get("points"):
         raise PreventUpdate
@@ -1314,9 +1285,9 @@ def highlight_confusion_cell(click, sc, temp, current_sel):
     true_class_name = order[true_idx_hit]
     pred_class_name = order[pred_idx_hit]
 
-    # Toggle logic: if same cell (by name), clear everything
+    # Toggle logic: if same cell (by name), clear
     if current_sel and current_sel[0] == true_class_name and current_sel[1] == pred_class_name:
-        return None, None, no_update, no_update
+        return None, None
 
     true_idx = res["true_idx"]
     preds = res["preds"]
@@ -1328,17 +1299,15 @@ def highlight_confusion_cell(click, sc, temp, current_sel):
         if ti == true_idx_hit and pi == pred_idx_hit:
             highlight_idxs.append(int(query_idxs[i]))
 
-    # Clear single-point selection rings when activating a group highlight
-    return highlight_idxs, [true_class_name, pred_class_name], None, None
+    return highlight_idxs, [true_class_name, pred_class_name]
 
 
 # ── 1b. Selection ring — lightweight Patch, no full figure rebuild ─
-# sel-query-store is now the single shared selection store used by all views.
+# sel-query-store is now only an Input here (removed from update_scatter).
 # Uses Patch() to splice just the ring trace onto the existing figure,
 # so zoom state, viewport, and the background mesh are untouched.
 
 _SEL_TRACE_ID = "selection-ring"
-_SUP_TRACE_ID = "support-ring"  # legacy uid — kept for cleanup only
 
 
 @app.callback(
@@ -1348,9 +1317,6 @@ _SUP_TRACE_ID = "support-ring"  # legacy uid — kept for cleanup only
     prevent_initial_call=True,
 )
 def update_selection_ring(sel_q, current_fig):
-    """Single unified ring for any selected point (query, support, or thumbnail).
-    White ring so it is neutral regardless of what kind of point is selected.
-    """
     p = Patch()
     if sel_q is not None and sel_q < len(engine.labels):
         ring = go.Scatter(
@@ -1358,25 +1324,25 @@ def update_selection_ring(sel_q, current_fig):
             y=[engine.embeddings_2d[sel_q, 1]],
             mode="markers",
             marker=dict(size=16, color="rgba(0,0,0,0)",
-                        line=dict(width=3, color="#ffffff")),
+                        line=dict(width=3, color=ERR_COL)),
             showlegend=False, hoverinfo="skip",
             uid=_SEL_TRACE_ID,
         )
+        # Remove any previous ring by filtering existing traces, then append
         existing = current_fig.get("data", [])
-        # Also strip any stale support-ring trace for clean mutual exclusivity
-        filtered = [t for t in existing
-                    if t.get("uid") not in (_SEL_TRACE_ID, _SUP_TRACE_ID)]
+        filtered = [t for t in existing if t.get("uid") != _SEL_TRACE_ID]
         p["data"] = filtered + [ring]
     else:
+        # Deselect — strip ring trace if present
         existing = current_fig.get("data", [])
-        filtered = [t for t in existing
-                    if t.get("uid") not in (_SEL_TRACE_ID, _SUP_TRACE_ID)]
+        filtered = [t for t in existing if t.get("uid") != _SEL_TRACE_ID]
         if len(filtered) == len(existing):
-            raise PreventUpdate
+            raise PreventUpdate  # no ring was present, nothing to do
         p["data"] = filtered
     return p
 
 
+_SUP_TRACE_ID = "support-ring"
 
 
 @app.callback(
@@ -1386,18 +1352,27 @@ def update_selection_ring(sel_q, current_fig):
     prevent_initial_call=True,
 )
 def update_support_ring(sel_sup, current_fig):
-    """Legacy cleanup-only callback: removes stale support-ring traces.
-    No longer adds new rings — update_selection_ring (via sel-query-store)
-    handles all single-point rings with mutual exclusivity.
-    """
+    """Patch a ring onto a support sketch when selected in the support panel."""
     if current_fig is None:
         raise PreventUpdate
+    p = Patch()
     existing = current_fig.get("data", [])
     filtered = [t for t in existing if t.get("uid") != _SUP_TRACE_ID]
-    if len(filtered) == len(existing):
-        raise PreventUpdate  # nothing to clean up
-    p = Patch()
-    p["data"] = filtered
+    if sel_sup is not None and isinstance(sel_sup, int) and sel_sup < len(engine.embeddings_2d):
+        ring = go.Scatter(
+            x=[engine.embeddings_2d[sel_sup, 0]],
+            y=[engine.embeddings_2d[sel_sup, 1]],
+            mode="markers",
+            marker=dict(size=16, color="rgba(0,0,0,0)",
+                        line=dict(width=2.5, color=ACCENT)),
+            showlegend=False, hoverinfo="skip",
+            uid=_SUP_TRACE_ID,
+        )
+        p["data"] = filtered + [ring]
+    else:
+        if len(filtered) == len(existing):
+            raise PreventUpdate
+        p["data"] = filtered
     return p
 
 
@@ -1409,17 +1384,15 @@ def update_support_ring(sel_sup, current_fig):
 
 @app.callback(
     Output("sc-store", "data", allow_duplicate=True),
-    Output("master-undo-store", "data", allow_duplicate=True),
-    Output("master-redo-store", "data", allow_duplicate=True),
+    Output("proto-undo-store", "data", allow_duplicate=True),
+    Output("proto-redo-store", "data", allow_duplicate=True),
     Input("annotation-relayout-store", "data"),
     State("sc-store", "data"),
-    State("active-classes-store", "data"),
-    State("color-map-store", "data"),
-    State("master-undo-store", "data"),
+    State("proto-undo-store", "data"),
     State("proto-order-store", "data"),
     prevent_initial_call=True,
 )
-def handle_annotation_drag(relayout, sc, active_classes, color_map, undo_stack, order):
+def handle_annotation_drag(relayout, sc, undo_stack, order):
     if not relayout or not order:
         raise PreventUpdate
 
@@ -1450,14 +1423,7 @@ def handle_annotation_drag(relayout, sc, active_classes, color_map, undo_stack, 
         raise PreventUpdate
 
     undo_stack = list(undo_stack or [])
-    undo_stack.append({
-        "desc": "Dragged Prototype",
-        "sc": sc,
-        "classes": active_classes,
-        "engine_classes": list(engine.class_names),
-        "colors": color_map,
-        "excluded": list(getattr(engine, "excluded_indices", set())),
-    })
+    undo_stack.append(sc)
     undo_stack = undo_stack[-_MAX_UNDO:]
     return new_sc, undo_stack, []  # clear redo on new drag
 
@@ -1475,18 +1441,9 @@ def handle_annotation_drag(relayout, sc, active_classes, color_map, undo_stack, 
     Input("scatter", "clickData"),
     State("sc-store", "data"),
     State("sidebar-mode-store", "data"),
-    State("sel-query-store",   "data"),
-    State("sel-support-store", "data"),
-    State("highlight-store",   "data"),
     prevent_initial_call=True,
 )
-def scatter_click(click, sc, mode, current_sel_q, current_sel_sup, current_hl):
-    """Handle scatter clicks with bidirectional toggle and mutual exclusivity.
-    - Query click: opens inspector; clicking same point again clears it.
-    - Support diamond click: highlights support ring; clicking same again clears it.
-    - Candidate mode click: highlights in UMAP; clicking same again clears it.
-    Only one highlight is active at a time (mutual exclusivity enforced here).
-    """
+def scatter_click(click, sc, mode):
     if not click or not click.get("points"):
         return None, None, no_update, None, None, None
     pt = click["points"][0]
@@ -1520,31 +1477,13 @@ def scatter_click(click, sc, mode, current_sel_q, current_sel_sup, current_hl):
     cname = engine.class_names[engine.labels[idx]]
 
     if mode == "candidates":
-        # Candidate mode: toggle highlight in UMAP, clear any other selections
-        current_hl_set = set()
-        if isinstance(current_hl, list):
-            current_hl_set = {int(i) for i in current_hl if i is not None}
-        elif isinstance(current_hl, int):
-            current_hl_set = {current_hl}
-        if idx in current_hl_set and len(current_hl_set) == 1:
-            # Toggle off: same single candidate clicked again
-            return None, None, no_update, no_update, None, no_update
+        # Candidate mode: Don't open inspector. Just highlight.
         return None, None, no_update, no_update, [idx], no_update
 
     if is_support_diamond:
-        # Support diamonds use sel-query-store (same as query points) so all
-        # views (inspector, confusion matrix row/col, ring) react identically.
-        # Toggle off: clicking the same diamond again clears everything.
-        if idx == current_sel_q:
-            return None, None, cname, no_update, None, no_update
-        # New support diamond: set sel-query-store, clear CM and support stores.
-        return idx, None, cname, no_update, None, None
+        return None, idx, cname, no_update, no_update, no_update
     else:
-        # Toggle off: clicking the same query point again
-        if idx == current_sel_q:
-            return None, None, no_update, no_update, None, no_update
-        # New query point: clear support and confusion highlights
-        return idx, None, cname, no_update, None, None
+        return idx, None, cname, no_update, no_update, no_update
 
 
 # ── 3b. Clear selection button ──────────────────────────────────
@@ -1603,6 +1542,7 @@ def _restore_snapshot(snapshot: dict, current_sel_class: str) -> tuple:
 
         if "excluded" in snapshot:
             engine.excluded_indices = set(snapshot["excluded"])
+            engine.save_excluded()
 
     raw_sc = snapshot.get("sc", {})
 
@@ -2710,8 +2650,6 @@ def _render_support(sel_class, sc, sel_sup, temp,
         # sketch is removed. Negative = helps; positive = hurts. One of three signals
         # shown alongside distance-to-prototype and distance-to-competitor.
         loo = sup_deltas.get(str(idx))
-        if loo is None and len(items) == 1:
-            loo = 0.0
         dist_val = d.get("dist", 0.0)
         comp = d.get("competitor_name", "")
         cdist_val = d.get("competitor_dist", 0.0)
@@ -2921,10 +2859,8 @@ def replace_image_callback(n, sel_q, uirev, sc, classes, colors, undo_stack, eng
 
 @app.callback(
     Output("class-selector",    "value",  allow_duplicate=True),
-    Output("sel-query-store",   "data",   allow_duplicate=True),
     Output("sel-support-store", "data",   allow_duplicate=True),
-    Output("highlight-store",   "data",   allow_duplicate=True),
-    Output("conf-selection-store", "data", allow_duplicate=True),
+    Output("sel-query-store",   "data",   allow_duplicate=True),
     Input({"type": "view-wrong-btn", "idx": ALL, "cls": ALL}, "n_clicks"),
     State({"type": "view-wrong-btn", "idx": ALL, "cls": ALL}, "id"),
     prevent_initial_call=True,
@@ -2941,9 +2877,9 @@ def navigate_to_wrong_support(clicks, ids):
         cls   = triggered["cls"]
     except Exception:
         raise PreventUpdate
-    # Switch class selector to the wrong class and set the shared selection
-    # so the UMAP ring, confusion matrix row/col, and inspector all update.
-    return cls, s_idx, None, None, None
+    # Switch class selector to the wrong class, highlight the support item,
+    # and close the inspector so the support panel becomes visible
+    return cls, s_idx, None
 
 
 # ── 8c. Co-activation toggle ─────────────────────────────────────
@@ -2988,21 +2924,12 @@ app.clientside_callback(
 # ── 8d. Influencer thumbnail click → highlight in UMAP ───────────
 
 @app.callback(
-    Output("sel-query-store",   "data", allow_duplicate=True),
     Output("sel-support-store", "data", allow_duplicate=True),
-    Output("highlight-store",   "data", allow_duplicate=True),
-    Output("conf-selection-store", "data", allow_duplicate=True),
     Input({"type": "infl-thumb", "idx": ALL}, "n_clicks"),
     State({"type": "infl-thumb", "idx": ALL}, "id"),
-    State("sel-query-store", "data"),
     prevent_initial_call=True,
 )
-def infl_thumb_highlight(clicks, ids, current_sel_q):
-    """Thumbnail click sets sel-query-store (the single shared selection).
-    This means the UMAP ring, confusion matrix row/col, and inspector all
-    react identically — full bidirectionality from any panel.
-    Clicking the same thumbnail again toggles it off.
-    """
+def infl_thumb_highlight(clicks, ids):
     if not clicks or not any(v for v in clicks if v):
         raise PreventUpdate
     ctx = callback_context
@@ -3011,12 +2938,7 @@ def infl_thumb_highlight(clicks, ids, current_sel_q):
     triggered = ctx.triggered_id
     if not isinstance(triggered, dict):
         raise PreventUpdate
-    idx = triggered["idx"]
-    # Toggle off: clicking the same thumbnail again clears everything
-    if idx == current_sel_q:
-        return None, None, None, no_update
-    # New thumbnail: set as the shared selection, clear CM group highlight
-    return idx, None, None, None
+    return triggered["idx"]
 
 
 # ── 10. Weight change ────────────────────────────────────────────
@@ -3134,14 +3056,7 @@ def _do_commit(whatif_sc, sc, classes, colors, temp, undo_stack, changelog, view
     entry = {"label": label, "delta": round(delta, 4),
              "acc": round(proj_acc, 4)}
     new_log  = ([entry] + list(changelog or []))[:20]
-    new_undo = (list(undo_stack or []) + [{
-        "desc": label,
-        "sc": sc,
-        "classes": classes,
-        "engine_classes": list(engine.class_names),
-        "colors": colors,
-        "excluded": list(getattr(engine, "excluded_indices", set())),
-    }])[-_MAX_UNDO:]
+    new_undo = (list(undo_stack or []) + [{"desc": label, "sc": sc, "classes": classes, "colors": colors}])[-_MAX_UNDO:]
     new_view_id = (view_id or 0) + 1
 
     engine.default_support = whatif_sc
@@ -3658,14 +3573,7 @@ def cycle_class_color(clicks, ids, sc, active, color_map, undo_stack):
 
     # Push to undo stack
     undo_stack = list(undo_stack or [])
-    undo_stack.append({
-        "desc": f"Color cycle: {name}",
-        "sc": sc,
-        "classes": active_list,
-        "engine_classes": list(engine.class_names),
-        "colors": old_color_map,
-        "excluded": list(getattr(engine, "excluded_indices", set())),
-    })
+    undo_stack.append({"sc": sc, "classes": active_list, "colors": old_color_map})
     undo_stack = undo_stack[-_MAX_UNDO:]
 
     # Current color index for this class
@@ -3711,32 +3619,12 @@ def manual_save(n, sc, classes, colors, custom_classes, uirev):
         "classes": classes or list(engine.class_names),
         "colors": colors or {},
         "custom_classes": custom_classes or [],
-        "excluded": list(getattr(engine, "excluded_indices", set())),
         "embeddings_2d": engine.embeddings_2d.tolist(), # Save current layout
         "uirevision": uirev # Save current uirevision
     }
 
-    engine.save_excluded()
     engine.save_session(_SESSION_PATH, app_state)
     return "● SAVED"
-
-
-@app.callback(
-    Output("engine-version-store", "data", allow_duplicate=True),
-    Input("recompute-embed-btn", "n_clicks"),
-    State("engine-version-store", "data"),
-    prevent_initial_call=True,
-)
-def recompute_embeddings_layout(n, engine_ver):
-    if not n:
-        raise PreventUpdate
-
-    with _engine_lock:
-        engine._compute_umap()
-
-    global _mesh_cache
-    _mesh_cache = {"key": None, "result": None}
-    return (engine_ver or 0) + 1
 
 
 # ── Button text auto-reset (clientside, Promise-based) ────────────
@@ -3990,14 +3878,13 @@ def import_custom_class(n_list, source_folder, assign_name_list, active, sc, col
     Input("class-selector",    "value"),
     Input("sc-store",          "data"),
     Input("candidate-delta-store", "data"),
-    Input("support-delta-store", "data"),
     Input("whatif-store",      "data"),
     Input("sel-query-store",   "data"),
     Input("highlight-store",   "data"),
     Input("sel-support-store", "data"),
     State("temp-slider",       "value"),
 )
-def render_candidate_scatter(sel_class, sc, delta_cache, support_delta_cache, whatif_sc, sel_q, hl_idx, sel_sup, temp):
+def render_candidate_scatter(sel_class, sc, delta_cache, whatif_sc, sel_q, hl_idx, sel_sup, temp):
     cands = engine.class_images_pool(sel_class, sc)
     if not cands:
          fig = go.Figure()
@@ -4007,8 +3894,6 @@ def render_candidate_scatter(sel_class, sc, delta_cache, support_delta_cache, wh
     whatif_sc = whatif_sc or sc
     sc_idxs = {it["idx"] for it in sc.get(sel_class, [])}
     whatif_idxs = {it["idx"] for it in whatif_sc.get(sel_class, [])}
-    support_items = list(sc.get(sel_class, []))
-    single_support_idx = support_items[0]["idx"] if len(support_items) == 1 else None
 
     x, y, idxs = [], [], []
     colors, symbols, sizes = [], [], []
@@ -4045,18 +3930,12 @@ def render_candidate_scatter(sel_class, sc, delta_cache, support_delta_cache, wh
             sizes.append(9)
             state_txt = "Candidate"
 
-        if in_sc:
-            d = support_delta_cache.get(str(idx)) if support_delta_cache else None
-            if d is None and single_support_idx == idx:
-                d = 0.0
-        else:
-            d = delta_cache.get(str(idx)) if delta_cache else None
+        d = delta_cache.get(str(idx)) if delta_cache else None
         if d is None:
             d_text = "computing..."
         elif isinstance(d, dict):
-            aff = f"  {d['most_affected_cls']} {d['most_affected_val']:+.1%}" if d["most_affected_cls"] else ""
-            note = "  [own↓ global↑]" if d["own"] < -0.005 and d["overall"] > 0.005 else ""
-            d_text = f"overall {d['overall']:+.1%}  own {d['own']:+.1%}{aff}{note}"
+            affected = f"  {d['most_affected_cls']} {d['most_affected_val']:+.1%}" if d['most_affected_cls'] else ""
+            d_text = f"overall {d['overall']:+.1%}{affected}"
         else:
             d_text = f"{d:+.1%}"  # backwards compat for any cached floats from before the change
         texts.append(f"#{idx}<br>State: {state_txt}<br>dist to prototype: {c['dist']:.2f}<br>comp dist: {c['competitor_dist']:.1f}<br>{d_text}")
@@ -4162,10 +4041,6 @@ def update_candidate_highlight_rings(hl_idx, sel_q, sel_sup, current_fig):
     return p
 
 
-SUPPORT_DELTA_BATCH = 8
-CANDIDATE_DELTA_BATCH = 12
-
-
 @app.callback(
     Output("candidate-delta-store", "data"),
     Output("support-delta-store",   "data"),
@@ -4173,8 +4048,8 @@ CANDIDATE_DELTA_BATCH = 12
     Input("delta-interval", "n_intervals"),
     Input("sidebar-mode-store", "data"),
     Input("class-selector", "value"),
-    Input("sc-store", "data"),
-    Input("temp-slider", "value"),
+    State("sc-store", "data"),
+    State("temp-slider", "value"),
     State("candidate-delta-store", "data"),
     State("support-delta-store",   "data"),
 )
@@ -4189,12 +4064,7 @@ def background_delta_worker(n, mode, sel_class, sc, temp, cand_cache, sup_cache)
         return {}, {}, True
 
     # Reset caches if the class or context changed
-    if (
-        "sidebar-mode-store" in triggered_ids
-        or "class-selector" in triggered_ids
-        or "sc-store" in triggered_ids
-        or "temp-slider" in triggered_ids
-    ):
+    if "sidebar-mode-store" in triggered_ids or "class-selector" in triggered_ids:
         cand_cache = {}
         sup_cache = {}
 
@@ -4203,19 +4073,15 @@ def background_delta_worker(n, mode, sel_class, sc, temp, cand_cache, sup_cache)
 
     # 1. Prioritize Support Set LOO deltas (visible in the main support list)
     if sel_class in sc:
-        items = list(sc[sel_class])
-
-        if len(items) <= 1:
-            for it in items:
-                sup_cache[str(it["idx"])] = 0.0
-        else:
+        items = sc[sel_class]
+        # Only compute if more than 1 item (otherwise delta=0 by definition)
+        if len(items) > 1:
             uncomputed_sup = [it for it in items if str(it["idx"]) not in sup_cache]
             if uncomputed_sup:
-                base_res = engine.classify(sc, temp)
-                for target in uncomputed_sup[:SUPPORT_DELTA_BATCH]:
-                    idx = target["idx"]
-                    delta = engine.support_loo_delta(sel_class, idx, sc, temp, base_res=base_res)
-                    sup_cache[str(idx)] = delta
+                target = uncomputed_sup[0]
+                idx = target["idx"]
+                delta = engine.support_loo_delta(sel_class, idx, sc, temp)
+                sup_cache[str(idx)] = delta
                 return cand_cache, sup_cache, False
 
     # 2. Compute Candidate deltas if in candidate mode
@@ -4226,11 +4092,10 @@ def background_delta_worker(n, mode, sel_class, sc, temp, cand_cache, sup_cache)
             cands = [c for c in pool if not c.get("is_support")]
             uncomputed_cand = [c for c in cands if str(c["idx"]) not in cand_cache]
             if uncomputed_cand:
-                base_res = engine.classify(sc, temp)
-                for target in uncomputed_cand[:CANDIDATE_DELTA_BATCH]:
-                    idx = target["idx"]
-                    delta = engine.candidate_add_delta(sel_class, idx, sc, temp, base_res=base_res)
-                    cand_cache[str(idx)] = delta
+                target = uncomputed_cand[0]
+                idx = target["idx"]
+                delta = engine.candidate_add_delta(sel_class, idx, sc, temp)
+                cand_cache[str(idx)] = delta
                 return cand_cache, sup_cache, False
 
     # Nothing more to compute
@@ -4309,16 +4174,11 @@ def update_sidebar_classname(mode, overview_tab):
 
 app.clientside_callback(
     """
-    function(mode, _drawChildren) {
+    function(mode) {
         if (mode !== 'draw') return window.dash_clientside.no_update;
-
-        const RETRY_DELAY_MS = 60;
-        const MAX_ATTEMPTS = 20;
-
-        const bindCanvas = () => {
+        setTimeout(() => {
             const canvas = document.getElementById('draw-canvas');
-            if (!canvas) return false;
-            if (canvas.dataset.bound === '1') return true;
+            if (!canvas) return;
 
             const ctx = canvas.getContext('2d');
             ctx.strokeStyle = 'white';
@@ -4326,16 +4186,6 @@ app.clientside_callback(
             ctx.lineCap = 'round';
 
             let drawing = false;
-            let undoStack = [];
-            let redoStack = [];
-
-            function saveState() {
-                undoStack.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
-                if (undoStack.length > 25) undoStack.shift();
-                redoStack = [];
-            }
-
-            saveState();
 
             canvas.onmousedown = (e) => {
                 drawing = true;
@@ -4348,14 +4198,25 @@ app.clientside_callback(
                     ctx.stroke();
                 }
             };
+            let undoStack = [];
+            let redoStack = [];
+
+            function saveState() {
+                undoStack.push(ctx.getImageData(0, 0, canvas.width, canvas.height));
+                if (undoStack.length > 25) undoStack.shift();
+                redoStack = [];
+            }
+
+            saveState();
+
             canvas.onmouseup = () => { drawing = false; saveState(); };
             canvas.onmouseleave = () => { drawing = false; };
-
+            
             const clearBtn = document.getElementById('clear-canvas-btn');
             if (clearBtn) {
-                clearBtn.onclick = () => {
-                    ctx.clearRect(0, 0, canvas.width, canvas.height);
-                    saveState();
+                clearBtn.onclick = () => { 
+                    ctx.clearRect(0, 0, canvas.width, canvas.height); 
+                    saveState(); 
                 };
             }
 
@@ -4399,37 +4260,23 @@ app.clientside_callback(
             const clearAfterClick = (btnId) => {
                 const btn = document.getElementById(btnId);
                 if (btn) {
-                    btn.onclick = () => {
+                    btn.addEventListener('click', () => {
                         setTimeout(() => {
                             ctx.clearRect(0, 0, canvas.width, canvas.height);
                             saveState();
                         }, 50);
-                    };
+                    });
                 }
             };
             clearAfterClick('stage-draw-btn');
             clearAfterClick('add-query-btn');
 
-            canvas.dataset.bound = '1';
-            return true;
-        };
-
-        let attempts = 0;
-        const tryBind = () => {
-            attempts += 1;
-            if (bindCanvas()) return;
-            if (attempts < MAX_ATTEMPTS) {
-                setTimeout(tryBind, RETRY_DELAY_MS);
-            }
-        };
-
-        tryBind();
+        }, 100);
         return true;
     }
     """,
     Output("draw-interval-active", "data"),
     Input("sidebar-mode-store", "data"),
-    Input("draw-panel", "children"),
     prevent_initial_call=False
 )
 
@@ -4454,38 +4301,6 @@ def toggle_draw_interval(mode):
 
 
 @app.callback(
-    Output("drawing-ghost-store", "data", allow_duplicate=True),
-    Output("draw-live-confidence", "children", allow_duplicate=True),
-    Input("sidebar-mode-store", "data"),
-    prevent_initial_call=True,
-)
-def clear_draw_state_on_close(mode):
-    if mode == "draw":
-        raise PreventUpdate
-    return None, "Confidence: N/A"
-
-
-app.clientside_callback(
-    """
-    function(mode) {
-        if (mode === 'draw') return window.dash_clientside.no_update;
-        const canvas = document.getElementById('draw-canvas');
-        if (canvas) {
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-            }
-        }
-        return null;
-    }
-    """,
-    Output("drawing-strokes-store", "data", allow_duplicate=True),
-    Input("sidebar-mode-store", "data"),
-    prevent_initial_call=True,
-)
-
-
-@app.callback(
     Output("drawing-ghost-store", "data"),
     Output("draw-live-confidence", "children"),
     Input("drawing-strokes-store", "data"),
@@ -4503,19 +4318,6 @@ def process_draw_strokes(data_url, sc, temp, active_class):
         decoded = __import__('base64').b64decode(encoded)
         img = Image.open(__import__('io').BytesIO(decoded)).convert('L')
         img_64 = img.resize((64, 64), Image.BICUBIC)
-
-        # Treat near-empty canvas as no prediction.
-        ink_pixels = int(np.count_nonzero(np.array(img_64, dtype=np.uint8) > 16))
-        if ink_pixels < 12:
-            raise PreventUpdate
-
-        # Sessions can restore 2D coordinates without a fitted reducer;
-        # drawing needs reducer.transform() for live ghost/confidence updates.
-        with _engine_lock:
-            if getattr(engine, "_umap_reducer", None) is None:
-                engine._compute_umap()
-                global _mesh_cache
-                _mesh_cache = {"key": None, "result": None}
         
         emb_hd, pos_2d = engine.encode_image(img_64)
         ghost = {
@@ -4528,6 +4330,7 @@ def process_draw_strokes(data_url, sc, temp, active_class):
             p2d, phd, order = engine.compute_prototypes(sc)
             if len(phd) > 0 and active_class in order:
                 from scipy.spatial.distance import cdist
+                import numpy as np
                 dists = cdist(emb_hd.reshape(1, -1), phd, metric='euclidean')
                 logits = -dists / max(temp or 1.0, 0.01)
                 probs = np.exp(logits - logits.max())

@@ -1,0 +1,1533 @@
+{
+  "meta": {
+    "n_support": 5,
+    "n_images_per_class": 30,
+    "n_support_configs": 20,
+    "n_query_volatility": 15,
+    "seed": 42
+  },
+  "available_base_classes": [
+    "apple",
+    "banana",
+    "bicycle",
+    "bird",
+    "bus",
+    "cake",
+    "car",
+    "cat",
+    "chair",
+    "clock",
+    "cloud",
+    "diamond",
+    "dog",
+    "door",
+    "eyeglasses",
+    "fish",
+    "flower",
+    "hexagon",
+    "horse",
+    "key",
+    "ladder",
+    "lightning",
+    "mountain",
+    "pizza",
+    "scissors",
+    "square",
+    "table",
+    "triangle",
+    "truck"
+  ],
+  "available_novel_classes": [
+    "airplane",
+    "book",
+    "tree",
+    "house",
+    "umbrella",
+    "guitar",
+    "moon",
+    "star"
+  ],
+  "distance_results": {
+    "apple": {
+      "intra_mean": 10.755650114469274,
+      "inter_min": 9.607164210617292,
+      "ratio": 0.8932202245676478,
+      "nearest": "moon"
+    },
+    "banana": {
+      "intra_mean": 9.821497696286933,
+      "inter_min": 5.275225665268498,
+      "ratio": 0.537110105647413,
+      "nearest": "moon"
+    },
+    "bicycle": {
+      "intra_mean": 9.929780873472193,
+      "inter_min": 11.425795367671366,
+      "ratio": 1.1506593663306142,
+      "nearest": "eyeglasses"
+    },
+    "bird": {
+      "intra_mean": 11.27754263433646,
+      "inter_min": 6.395010854500656,
+      "ratio": 0.5670571206736051,
+      "nearest": "airplane"
+    },
+    "bus": {
+      "intra_mean": 10.768296533786065,
+      "inter_min": 6.994120502074505,
+      "ratio": 0.6495103919296896,
+      "nearest": "truck"
+    },
+    "cake": {
+      "intra_mean": 11.246197050152439,
+      "inter_min": 9.253741643977467,
+      "ratio": 0.8228329632417418,
+      "nearest": "book"
+    },
+    "car": {
+      "intra_mean": 11.26447125516981,
+      "inter_min": 4.578423703193828,
+      "ratio": 0.4064481678261258,
+      "nearest": "truck"
+    },
+    "cat": {
+      "intra_mean": 12.401075494514986,
+      "inter_min": 7.492330932975985,
+      "ratio": 0.6041678349825267,
+      "nearest": "airplane"
+    },
+    "chair": {
+      "intra_mean": 9.168606518106355,
+      "inter_min": 10.351513188688209,
+      "ratio": 1.1290170614526673,
+      "nearest": "table"
+    },
+    "clock": {
+      "intra_mean": 8.935078474660397,
+      "inter_min": 9.02781436262262,
+      "ratio": 1.0103788554544002,
+      "nearest": "moon"
+    },
+    "cloud": {
+      "intra_mean": 9.21137514766358,
+      "inter_min": 9.773405315414927,
+      "ratio": 1.0610147951572577,
+      "nearest": "tree"
+    },
+    "diamond": {
+      "intra_mean": 8.829352395504747,
+      "inter_min": 11.132383263663348,
+      "ratio": 1.260838028090388,
+      "nearest": "hexagon"
+    },
+    "dog": {
+      "intra_mean": 12.952402565223021,
+      "inter_min": 5.844592669052975,
+      "ratio": 0.45123618105768315,
+      "nearest": "horse"
+    },
+    "door": {
+      "intra_mean": 7.876313936106001,
+      "inter_min": 8.442547653100696,
+      "ratio": 1.0718906993281476,
+      "nearest": "square"
+    },
+    "eyeglasses": {
+      "intra_mean": 9.392779624728451,
+      "inter_min": 10.722975775292577,
+      "ratio": 1.14161900988948,
+      "nearest": "airplane"
+    },
+    "fish": {
+      "intra_mean": 9.180061387869511,
+      "inter_min": 10.88577890449267,
+      "ratio": 1.1858067658324252,
+      "nearest": "airplane"
+    },
+    "flower": {
+      "intra_mean": 10.421774380991392,
+      "inter_min": 7.552366837950275,
+      "ratio": 0.7246718804165707,
+      "nearest": "tree"
+    },
+    "hexagon": {
+      "intra_mean": 8.659574991322186,
+      "inter_min": 11.058852454747226,
+      "ratio": 1.2770664225241275,
+      "nearest": "umbrella"
+    },
+    "horse": {
+      "intra_mean": 9.539463797032392,
+      "inter_min": 5.844592669052975,
+      "ratio": 0.612675176865932,
+      "nearest": "dog"
+    },
+    "key": {
+      "intra_mean": 10.805285275344126,
+      "inter_min": 5.47876855056291,
+      "ratio": 0.5070452478533402,
+      "nearest": "guitar"
+    },
+    "ladder": {
+      "intra_mean": 8.724786653534766,
+      "inter_min": 11.46571689058794,
+      "ratio": 1.3141544138437713,
+      "nearest": "chair"
+    },
+    "lightning": {
+      "intra_mean": 11.34005491452385,
+      "inter_min": 8.776217991725193,
+      "ratio": 0.7739131827734796,
+      "nearest": "tree"
+    },
+    "mountain": {
+      "intra_mean": 10.20350581189701,
+      "inter_min": 10.888258927048616,
+      "ratio": 1.0671095923082832,
+      "nearest": "triangle"
+    },
+    "pizza": {
+      "intra_mean": 11.369191040877602,
+      "inter_min": 9.653208137970031,
+      "ratio": 0.8490672822069922,
+      "nearest": "book"
+    },
+    "scissors": {
+      "intra_mean": 11.890767193648053,
+      "inter_min": 5.895489655057634,
+      "ratio": 0.4958039762318242,
+      "nearest": "guitar"
+    },
+    "square": {
+      "intra_mean": 6.647794657541809,
+      "inter_min": 7.339900007985035,
+      "ratio": 1.1041105187655045,
+      "nearest": "book"
+    },
+    "table": {
+      "intra_mean": 8.49745902706232,
+      "inter_min": 10.20040140778046,
+      "ratio": 1.2004060714261389,
+      "nearest": "book"
+    },
+    "triangle": {
+      "intra_mean": 7.322553713775536,
+      "inter_min": 8.108492234918486,
+      "ratio": 1.1073312060059601,
+      "nearest": "house"
+    },
+    "truck": {
+      "intra_mean": 10.084298478144916,
+      "inter_min": 4.578423703193828,
+      "ratio": 0.454015092186766,
+      "nearest": "car"
+    },
+    "airplane": {
+      "intra_mean": 9.607496335954613,
+      "inter_min": 6.395010854500656,
+      "ratio": 0.6656271968138346,
+      "nearest": "bird"
+    },
+    "book": {
+      "intra_mean": 10.695603274604716,
+      "inter_min": 6.449565057103443,
+      "ratio": 0.603010871992333,
+      "nearest": "house"
+    },
+    "tree": {
+      "intra_mean": 10.540393571984545,
+      "inter_min": 6.478590194327206,
+      "ratio": 0.6146440500615403,
+      "nearest": "umbrella"
+    },
+    "house": {
+      "intra_mean": 8.554300273135189,
+      "inter_min": 6.449565057103443,
+      "ratio": 0.7539558878191739,
+      "nearest": "book"
+    },
+    "umbrella": {
+      "intra_mean": 9.268447493334776,
+      "inter_min": 6.478590194327206,
+      "ratio": 0.698994108666652,
+      "nearest": "tree"
+    },
+    "guitar": {
+      "intra_mean": 10.572230850843976,
+      "inter_min": 5.47876855056291,
+      "ratio": 0.51822256133629,
+      "nearest": "key"
+    },
+    "moon": {
+      "intra_mean": 11.421063652335109,
+      "inter_min": 5.275225665268498,
+      "ratio": 0.4618856724601079,
+      "nearest": "banana"
+    },
+    "star": {
+      "intra_mean": 11.633098492890127,
+      "inter_min": 7.962434148753268,
+      "ratio": 0.6844637439990487,
+      "nearest": "airplane"
+    }
+  },
+  "confusion_accuracy": {
+    "apple": {
+      "accuracy": 0.84,
+      "correct": 21,
+      "total": 25,
+      "top_confused": [
+        [
+          "bicycle",
+          1
+        ],
+        [
+          "clock",
+          1
+        ],
+        [
+          "key",
+          1
+        ]
+      ]
+    },
+    "banana": {
+      "accuracy": 0.88,
+      "correct": 22,
+      "total": 25,
+      "top_confused": [
+        [
+          "clock",
+          1
+        ],
+        [
+          "chair",
+          1
+        ],
+        [
+          "dog",
+          1
+        ]
+      ]
+    },
+    "bicycle": {
+      "accuracy": 0.92,
+      "correct": 23,
+      "total": 25,
+      "top_confused": [
+        [
+          "horse",
+          1
+        ],
+        [
+          "scissors",
+          1
+        ]
+      ]
+    },
+    "bird": {
+      "accuracy": 0.84,
+      "correct": 21,
+      "total": 25,
+      "top_confused": [
+        [
+          "key",
+          1
+        ],
+        [
+          "banana",
+          1
+        ],
+        [
+          "apple",
+          1
+        ]
+      ]
+    },
+    "bus": {
+      "accuracy": 0.92,
+      "correct": 23,
+      "total": 25,
+      "top_confused": [
+        [
+          "truck",
+          1
+        ],
+        [
+          "cat",
+          1
+        ]
+      ]
+    },
+    "cake": {
+      "accuracy": 0.92,
+      "correct": 23,
+      "total": 25,
+      "top_confused": [
+        [
+          "pizza",
+          2
+        ]
+      ]
+    },
+    "car": {
+      "accuracy": 0.64,
+      "correct": 16,
+      "total": 25,
+      "top_confused": [
+        [
+          "bus",
+          7
+        ],
+        [
+          "square",
+          1
+        ],
+        [
+          "truck",
+          1
+        ]
+      ]
+    },
+    "cat": {
+      "accuracy": 0.76,
+      "correct": 19,
+      "total": 25,
+      "top_confused": [
+        [
+          "horse",
+          2
+        ],
+        [
+          "clock",
+          1
+        ],
+        [
+          "dog",
+          1
+        ]
+      ]
+    },
+    "chair": {
+      "accuracy": 0.88,
+      "correct": 22,
+      "total": 25,
+      "top_confused": [
+        [
+          "cat",
+          1
+        ],
+        [
+          "table",
+          1
+        ],
+        [
+          "car",
+          1
+        ]
+      ]
+    },
+    "clock": {
+      "accuracy": 1.0,
+      "correct": 25,
+      "total": 25,
+      "top_confused": []
+    },
+    "cloud": {
+      "accuracy": 0.96,
+      "correct": 24,
+      "total": 25,
+      "top_confused": [
+        [
+          "fish",
+          1
+        ]
+      ]
+    },
+    "diamond": {
+      "accuracy": 0.88,
+      "correct": 22,
+      "total": 25,
+      "top_confused": [
+        [
+          "hexagon",
+          3
+        ]
+      ]
+    },
+    "dog": {
+      "accuracy": 0.24,
+      "correct": 6,
+      "total": 25,
+      "top_confused": [
+        [
+          "horse",
+          8
+        ],
+        [
+          "bird",
+          2
+        ],
+        [
+          "key",
+          2
+        ]
+      ]
+    },
+    "door": {
+      "accuracy": 0.96,
+      "correct": 24,
+      "total": 25,
+      "top_confused": [
+        [
+          "chair",
+          1
+        ]
+      ]
+    },
+    "eyeglasses": {
+      "accuracy": 0.96,
+      "correct": 24,
+      "total": 25,
+      "top_confused": [
+        [
+          "car",
+          1
+        ]
+      ]
+    },
+    "fish": {
+      "accuracy": 1.0,
+      "correct": 25,
+      "total": 25,
+      "top_confused": []
+    },
+    "flower": {
+      "accuracy": 0.88,
+      "correct": 22,
+      "total": 25,
+      "top_confused": [
+        [
+          "key",
+          1
+        ],
+        [
+          "bird",
+          1
+        ],
+        [
+          "lightning",
+          1
+        ]
+      ]
+    },
+    "hexagon": {
+      "accuracy": 0.96,
+      "correct": 24,
+      "total": 25,
+      "top_confused": [
+        [
+          "triangle",
+          1
+        ]
+      ]
+    },
+    "horse": {
+      "accuracy": 0.92,
+      "correct": 23,
+      "total": 25,
+      "top_confused": [
+        [
+          "dog",
+          1
+        ],
+        [
+          "cat",
+          1
+        ]
+      ]
+    },
+    "key": {
+      "accuracy": 0.88,
+      "correct": 22,
+      "total": 25,
+      "top_confused": [
+        [
+          "fish",
+          2
+        ],
+        [
+          "banana",
+          1
+        ]
+      ]
+    },
+    "ladder": {
+      "accuracy": 0.96,
+      "correct": 24,
+      "total": 25,
+      "top_confused": [
+        [
+          "bus",
+          1
+        ]
+      ]
+    },
+    "lightning": {
+      "accuracy": 0.8,
+      "correct": 20,
+      "total": 25,
+      "top_confused": [
+        [
+          "banana",
+          2
+        ],
+        [
+          "flower",
+          1
+        ],
+        [
+          "bird",
+          1
+        ]
+      ]
+    },
+    "mountain": {
+      "accuracy": 0.88,
+      "correct": 22,
+      "total": 25,
+      "top_confused": [
+        [
+          "bird",
+          1
+        ],
+        [
+          "chair",
+          1
+        ],
+        [
+          "horse",
+          1
+        ]
+      ]
+    },
+    "pizza": {
+      "accuracy": 0.76,
+      "correct": 19,
+      "total": 25,
+      "top_confused": [
+        [
+          "diamond",
+          2
+        ],
+        [
+          "banana",
+          1
+        ],
+        [
+          "fish",
+          1
+        ]
+      ]
+    },
+    "scissors": {
+      "accuracy": 0.72,
+      "correct": 18,
+      "total": 25,
+      "top_confused": [
+        [
+          "hexagon",
+          2
+        ],
+        [
+          "key",
+          2
+        ],
+        [
+          "banana",
+          1
+        ]
+      ]
+    },
+    "square": {
+      "accuracy": 0.88,
+      "correct": 22,
+      "total": 25,
+      "top_confused": [
+        [
+          "door",
+          3
+        ]
+      ]
+    },
+    "table": {
+      "accuracy": 0.96,
+      "correct": 24,
+      "total": 25,
+      "top_confused": [
+        [
+          "chair",
+          1
+        ]
+      ]
+    },
+    "triangle": {
+      "accuracy": 1.0,
+      "correct": 25,
+      "total": 25,
+      "top_confused": []
+    },
+    "truck": {
+      "accuracy": 0.56,
+      "correct": 14,
+      "total": 25,
+      "top_confused": [
+        [
+          "car",
+          6
+        ],
+        [
+          "bus",
+          4
+        ],
+        [
+          "key",
+          1
+        ]
+      ]
+    }
+  },
+  "overall_accuracy_base": 0.8537931034482757,
+  "top_confusion_pairs": [
+    {
+      "score": 0.426,
+      "class_a": "dog",
+      "class_b": "horse",
+      "mutual_conf": 0.18,
+      "conf_a_to_b": 8,
+      "conf_b_to_a": 1,
+      "mutual_nearest": true
+    },
+    {
+      "score": 0.39799999999999996,
+      "class_a": "car",
+      "class_b": "truck",
+      "mutual_conf": 0.13999999999999999,
+      "conf_a_to_b": 1,
+      "conf_b_to_a": 6,
+      "mutual_nearest": true
+    },
+    {
+      "score": 0.098,
+      "class_a": "bus",
+      "class_b": "car",
+      "mutual_conf": 0.14,
+      "conf_a_to_b": 0,
+      "conf_b_to_a": 7,
+      "mutual_nearest": false
+    },
+    {
+      "score": 0.06999999999999999,
+      "class_a": "bus",
+      "class_b": "truck",
+      "mutual_conf": 0.1,
+      "conf_a_to_b": 1,
+      "conf_b_to_a": 4,
+      "mutual_nearest": false
+    },
+    {
+      "score": 0.041999999999999996,
+      "class_a": "cat",
+      "class_b": "horse",
+      "mutual_conf": 0.06,
+      "conf_a_to_b": 2,
+      "conf_b_to_a": 1,
+      "mutual_nearest": false
+    },
+    {
+      "score": 0.041999999999999996,
+      "class_a": "diamond",
+      "class_b": "hexagon",
+      "mutual_conf": 0.06,
+      "conf_a_to_b": 3,
+      "conf_b_to_a": 0,
+      "mutual_nearest": false
+    },
+    {
+      "score": 0.041999999999999996,
+      "class_a": "door",
+      "class_b": "square",
+      "mutual_conf": 0.06,
+      "conf_a_to_b": 0,
+      "conf_b_to_a": 3,
+      "mutual_nearest": false
+    },
+    {
+      "score": 0.027999999999999997,
+      "class_a": "banana",
+      "class_b": "lightning",
+      "mutual_conf": 0.04,
+      "conf_a_to_b": 0,
+      "conf_b_to_a": 2,
+      "mutual_nearest": false
+    },
+    {
+      "score": 0.027999999999999997,
+      "class_a": "bird",
+      "class_b": "dog",
+      "mutual_conf": 0.04,
+      "conf_a_to_b": 0,
+      "conf_b_to_a": 2,
+      "mutual_nearest": false
+    },
+    {
+      "score": 0.027999999999999997,
+      "class_a": "cake",
+      "class_b": "pizza",
+      "mutual_conf": 0.04,
+      "conf_a_to_b": 2,
+      "conf_b_to_a": 0,
+      "mutual_nearest": false
+    }
+  ],
+  "support_volatility": {
+    "apple": {
+      "acc_mean": 0.8099999999999999,
+      "acc_std": 0.07078920193865103,
+      "acc_min": 0.6666666666666666,
+      "acc_max": 0.9333333333333333
+    },
+    "banana": {
+      "acc_mean": 0.8400000000000001,
+      "acc_std": 0.0879393730551528,
+      "acc_min": 0.6666666666666666,
+      "acc_max": 1.0
+    },
+    "bicycle": {
+      "acc_mean": 0.9366666666666668,
+      "acc_std": 0.049328828623162464,
+      "acc_min": 0.8,
+      "acc_max": 1.0
+    },
+    "bird": {
+      "acc_mean": 0.8266666666666668,
+      "acc_std": 0.07717224601860152,
+      "acc_min": 0.6666666666666666,
+      "acc_max": 0.9333333333333333
+    },
+    "bus": {
+      "acc_mean": 0.7266666666666667,
+      "acc_std": 0.0840634680861233,
+      "acc_min": 0.5333333333333333,
+      "acc_max": 0.8666666666666667
+    },
+    "cake": {
+      "acc_mean": 0.8866666666666667,
+      "acc_std": 0.08192137151629673,
+      "acc_min": 0.6666666666666666,
+      "acc_max": 1.0
+    },
+    "car": {
+      "acc_mean": 0.5399999999999998,
+      "acc_std": 0.0916515138991168,
+      "acc_min": 0.3333333333333333,
+      "acc_max": 0.6666666666666666
+    },
+    "cat": {
+      "acc_mean": 0.7766666666666666,
+      "acc_std": 0.08504900548115386,
+      "acc_min": 0.6,
+      "acc_max": 0.8666666666666667
+    },
+    "chair": {
+      "acc_mean": 0.8366666666666667,
+      "acc_std": 0.08020806277010645,
+      "acc_min": 0.7333333333333333,
+      "acc_max": 1.0
+    },
+    "clock": {
+      "acc_mean": 0.9133333333333334,
+      "acc_std": 0.059999999999999984,
+      "acc_min": 0.8,
+      "acc_max": 1.0
+    },
+    "cloud": {
+      "acc_mean": 0.9133333333333334,
+      "acc_std": 0.05617433182117571,
+      "acc_min": 0.8,
+      "acc_max": 1.0
+    },
+    "diamond": {
+      "acc_mean": 0.9400000000000001,
+      "acc_std": 0.06289320754704401,
+      "acc_min": 0.8,
+      "acc_max": 1.0
+    },
+    "dog": {
+      "acc_mean": 0.34666666666666673,
+      "acc_std": 0.10456258094238748,
+      "acc_min": 0.2,
+      "acc_max": 0.5333333333333333
+    },
+    "door": {
+      "acc_mean": 0.9133333333333334,
+      "acc_std": 0.059999999999999984,
+      "acc_min": 0.8,
+      "acc_max": 1.0
+    },
+    "eyeglasses": {
+      "acc_mean": 0.9266666666666667,
+      "acc_std": 0.04666666666666666,
+      "acc_min": 0.8666666666666667,
+      "acc_max": 1.0
+    },
+    "fish": {
+      "acc_mean": 0.9199999999999999,
+      "acc_std": 0.054160256030906385,
+      "acc_min": 0.8,
+      "acc_max": 1.0
+    },
+    "flower": {
+      "acc_mean": 0.8700000000000001,
+      "acc_std": 0.057638721552635275,
+      "acc_min": 0.7333333333333333,
+      "acc_max": 0.9333333333333333
+    },
+    "hexagon": {
+      "acc_mean": 0.9133333333333334,
+      "acc_std": 0.05617433182117571,
+      "acc_min": 0.8,
+      "acc_max": 1.0
+    },
+    "horse": {
+      "acc_mean": 0.7866666666666666,
+      "acc_std": 0.07483314773547885,
+      "acc_min": 0.6666666666666666,
+      "acc_max": 0.9333333333333333
+    },
+    "key": {
+      "acc_mean": 0.8466666666666667,
+      "acc_std": 0.08459051693633016,
+      "acc_min": 0.6,
+      "acc_max": 0.9333333333333333
+    },
+    "ladder": {
+      "acc_mean": 0.8866666666666667,
+      "acc_std": 0.07333333333333332,
+      "acc_min": 0.7333333333333333,
+      "acc_max": 1.0
+    },
+    "lightning": {
+      "acc_mean": 0.7533333333333334,
+      "acc_std": 0.07916228058025282,
+      "acc_min": 0.6,
+      "acc_max": 0.8666666666666667
+    },
+    "mountain": {
+      "acc_mean": 0.9066666666666666,
+      "acc_std": 0.0573488351136175,
+      "acc_min": 0.8,
+      "acc_max": 1.0
+    },
+    "pizza": {
+      "acc_mean": 0.8333333333333334,
+      "acc_std": 0.09545214042184237,
+      "acc_min": 0.6,
+      "acc_max": 1.0
+    },
+    "scissors": {
+      "acc_mean": 0.7933333333333333,
+      "acc_std": 0.05537749241945386,
+      "acc_min": 0.6666666666666666,
+      "acc_max": 0.8666666666666667
+    },
+    "square": {
+      "acc_mean": 0.8866666666666667,
+      "acc_std": 0.04760952285695232,
+      "acc_min": 0.8,
+      "acc_max": 1.0
+    },
+    "table": {
+      "acc_mean": 0.93,
+      "acc_std": 0.05763872155263526,
+      "acc_min": 0.8,
+      "acc_max": 1.0
+    },
+    "triangle": {
+      "acc_mean": 0.9800000000000001,
+      "acc_std": 0.03711842908553348,
+      "acc_min": 0.8666666666666667,
+      "acc_max": 1.0
+    },
+    "truck": {
+      "acc_mean": 0.4666666666666666,
+      "acc_std": 0.1398411797560202,
+      "acc_min": 0.2,
+      "acc_max": 0.6666666666666666
+    }
+  },
+  "embedding_isotropy": {
+    "apple": {
+      "participation_ratio": 0.1666191965341568,
+      "top1_var_explained": 0.392436146736145
+    },
+    "banana": {
+      "participation_ratio": 0.1604529470205307,
+      "top1_var_explained": 0.39921465516090393
+    },
+    "bicycle": {
+      "participation_ratio": 0.2601556181907654,
+      "top1_var_explained": 0.23632152378559113
+    },
+    "bird": {
+      "participation_ratio": 0.2544762194156647,
+      "top1_var_explained": 0.2946762144565582
+    },
+    "bus": {
+      "participation_ratio": 0.17910555005073547,
+      "top1_var_explained": 0.311472624540329
+    },
+    "cake": {
+      "participation_ratio": 0.18984217941761017,
+      "top1_var_explained": 0.3101631700992584
+    },
+    "car": {
+      "participation_ratio": 0.2117752730846405,
+      "top1_var_explained": 0.32109105587005615
+    },
+    "cat": {
+      "participation_ratio": 0.1823669672012329,
+      "top1_var_explained": 0.3792971968650818
+    },
+    "chair": {
+      "participation_ratio": 0.23882515728473663,
+      "top1_var_explained": 0.2381541132926941
+    },
+    "clock": {
+      "participation_ratio": 0.25300613045692444,
+      "top1_var_explained": 0.25217556953430176
+    },
+    "cloud": {
+      "participation_ratio": 0.20998656749725342,
+      "top1_var_explained": 0.33962270617485046
+    },
+    "diamond": {
+      "participation_ratio": 0.23744724690914154,
+      "top1_var_explained": 0.28790900111198425
+    },
+    "dog": {
+      "participation_ratio": 0.2522534132003784,
+      "top1_var_explained": 0.24148572981357574
+    },
+    "door": {
+      "participation_ratio": 0.20924493670463562,
+      "top1_var_explained": 0.27977731823921204
+    },
+    "eyeglasses": {
+      "participation_ratio": 0.18900881707668304,
+      "top1_var_explained": 0.3376043140888214
+    },
+    "fish": {
+      "participation_ratio": 0.22061997652053833,
+      "top1_var_explained": 0.3047330975532532
+    },
+    "flower": {
+      "participation_ratio": 0.2204580456018448,
+      "top1_var_explained": 0.26646965742111206
+    },
+    "hexagon": {
+      "participation_ratio": 0.1457281857728958,
+      "top1_var_explained": 0.4358731210231781
+    },
+    "horse": {
+      "participation_ratio": 0.2523203492164612,
+      "top1_var_explained": 0.2924666106700897
+    },
+    "key": {
+      "participation_ratio": 0.1943642497062683,
+      "top1_var_explained": 0.3511228859424591
+    },
+    "ladder": {
+      "participation_ratio": 0.12884531915187836,
+      "top1_var_explained": 0.46657970547676086
+    },
+    "lightning": {
+      "participation_ratio": 0.16886045038700104,
+      "top1_var_explained": 0.3819331228733063
+    },
+    "mountain": {
+      "participation_ratio": 0.18927006423473358,
+      "top1_var_explained": 0.323188453912735
+    },
+    "pizza": {
+      "participation_ratio": 0.2294960767030716,
+      "top1_var_explained": 0.30082231760025024
+    },
+    "scissors": {
+      "participation_ratio": 0.22474531829357147,
+      "top1_var_explained": 0.311378538608551
+    },
+    "square": {
+      "participation_ratio": 0.1468009054660797,
+      "top1_var_explained": 0.39018574357032776
+    },
+    "table": {
+      "participation_ratio": 0.2304098904132843,
+      "top1_var_explained": 0.2623938322067261
+    },
+    "triangle": {
+      "participation_ratio": 0.2033078521490097,
+      "top1_var_explained": 0.31154224276542664
+    },
+    "truck": {
+      "participation_ratio": 0.2595239281654358,
+      "top1_var_explained": 0.261984646320343
+    },
+    "airplane": {
+      "participation_ratio": 0.30980032682418823,
+      "top1_var_explained": 0.19281524419784546
+    },
+    "book": {
+      "participation_ratio": 0.24245603382587433,
+      "top1_var_explained": 0.29072245955467224
+    },
+    "tree": {
+      "participation_ratio": 0.2764909267425537,
+      "top1_var_explained": 0.24815863370895386
+    },
+    "house": {
+      "participation_ratio": 0.25587671995162964,
+      "top1_var_explained": 0.22954188287258148
+    },
+    "umbrella": {
+      "participation_ratio": 0.3076958656311035,
+      "top1_var_explained": 0.19679126143455505
+    },
+    "guitar": {
+      "participation_ratio": 0.211147278547287,
+      "top1_var_explained": 0.313067764043808
+    },
+    "moon": {
+      "participation_ratio": 0.18671424686908722,
+      "top1_var_explained": 0.3343731164932251
+    },
+    "star": {
+      "participation_ratio": 0.15512889623641968,
+      "top1_var_explained": 0.4203900694847107
+    }
+  },
+  "novel_class_separation": {
+    "airplane": {
+      "accuracy": 0.72,
+      "correct": 18,
+      "total_queries": 25,
+      "nearest_base": "bird",
+      "nearest_dist": 5.585613250732422,
+      "confusion": {
+        "key": 2,
+        "cat": 2,
+        "fish": 1,
+        "car": 1,
+        "bird": 1
+      }
+    },
+    "book": {
+      "accuracy": 0.52,
+      "correct": 13,
+      "total_queries": 25,
+      "nearest_base": "square",
+      "nearest_dist": 8.271533966064453,
+      "confusion": {
+        "square": 4,
+        "table": 3,
+        "door": 3,
+        "bus": 1,
+        "clock": 1
+      }
+    },
+    "tree": {
+      "accuracy": 0.72,
+      "correct": 18,
+      "total_queries": 25,
+      "nearest_base": "bird",
+      "nearest_dist": 6.889886379241943,
+      "confusion": {
+        "flower": 4,
+        "lightning": 1,
+        "cloud": 1,
+        "cat": 1
+      }
+    },
+    "house": {
+      "accuracy": 0.92,
+      "correct": 23,
+      "total_queries": 25,
+      "nearest_base": "cake",
+      "nearest_dist": 9.138864517211914,
+      "confusion": {
+        "square": 1,
+        "table": 1
+      }
+    },
+    "umbrella": {
+      "accuracy": 0.72,
+      "correct": 18,
+      "total_queries": 25,
+      "nearest_base": "bird",
+      "nearest_dist": 8.089376449584961,
+      "confusion": {
+        "key": 4,
+        "bird": 2,
+        "apple": 1
+      }
+    },
+    "guitar": {
+      "accuracy": 0.6,
+      "correct": 15,
+      "total_queries": 25,
+      "nearest_base": "key",
+      "nearest_dist": 4.84086275100708,
+      "confusion": {
+        "key": 5,
+        "scissors": 5
+      }
+    },
+    "moon": {
+      "accuracy": 0.32,
+      "correct": 8,
+      "total_queries": 25,
+      "nearest_base": "banana",
+      "nearest_dist": 7.712396621704102,
+      "confusion": {
+        "banana": 10,
+        "clock": 3,
+        "eyeglasses": 1,
+        "key": 1,
+        "hexagon": 1
+      }
+    },
+    "star": {
+      "accuracy": 0.92,
+      "correct": 23,
+      "total_queries": 25,
+      "nearest_base": "bird",
+      "nearest_dist": 10.39129638671875,
+      "confusion": {
+        "cat": 1,
+        "mountain": 1
+      }
+    }
+  },
+  "recommended_base_subset": [
+    "triangle",
+    "truck",
+    "horse",
+    "dog",
+    "car",
+    "cat",
+    "pizza",
+    "scissors",
+    "banana",
+    "key"
+  ],
+  "recommended_novel_class": "moon",
+  "subset_eval": {
+    "subset": [
+      "triangle",
+      "truck",
+      "horse",
+      "dog",
+      "car",
+      "cat",
+      "pizza",
+      "scissors",
+      "banana",
+      "key"
+    ],
+    "novel_class": "moon",
+    "distance": {
+      "triangle": {
+        "intra_mean": 7.322553713775536,
+        "inter_min": 14.145959074057561,
+        "ratio": 1.9318341151182696,
+        "nearest": "pizza"
+      },
+      "truck": {
+        "intra_mean": 10.084298478144916,
+        "inter_min": 4.578423703193828,
+        "ratio": 0.454015092186766,
+        "nearest": "car"
+      },
+      "horse": {
+        "intra_mean": 9.539463797032392,
+        "inter_min": 5.844592669052975,
+        "ratio": 0.612675176865932,
+        "nearest": "dog"
+      },
+      "dog": {
+        "intra_mean": 12.952402565223021,
+        "inter_min": 5.844592669052975,
+        "ratio": 0.45123618105768315,
+        "nearest": "horse"
+      },
+      "car": {
+        "intra_mean": 11.26447125516981,
+        "inter_min": 4.578423703193828,
+        "ratio": 0.4064481678261258,
+        "nearest": "truck"
+      },
+      "cat": {
+        "intra_mean": 12.401075494514986,
+        "inter_min": 9.635374719080751,
+        "ratio": 0.7769789582639418,
+        "nearest": "dog"
+      },
+      "pizza": {
+        "intra_mean": 11.369191040877602,
+        "inter_min": 13.686850465080282,
+        "ratio": 1.203854382943307,
+        "nearest": "cat"
+      },
+      "scissors": {
+        "intra_mean": 11.890767193648053,
+        "inter_min": 9.699264130021547,
+        "ratio": 0.8156970843061171,
+        "nearest": "key"
+      },
+      "banana": {
+        "intra_mean": 9.821497696286933,
+        "inter_min": 10.70869182660461,
+        "ratio": 1.0903318574979746,
+        "nearest": "scissors"
+      },
+      "key": {
+        "intra_mean": 10.805285275344126,
+        "inter_min": 9.699264130021547,
+        "ratio": 0.8976407270017815,
+        "nearest": "scissors"
+      }
+    },
+    "confusion_acc": {
+      "triangle": {
+        "accuracy": 1.0,
+        "correct": 25,
+        "total": 25,
+        "top_confused": []
+      },
+      "truck": {
+        "accuracy": 0.72,
+        "correct": 18,
+        "total": 25,
+        "top_confused": [
+          [
+            "car",
+            6
+          ],
+          [
+            "key",
+            1
+          ]
+        ]
+      },
+      "horse": {
+        "accuracy": 0.92,
+        "correct": 23,
+        "total": 25,
+        "top_confused": [
+          [
+            "dog",
+            1
+          ],
+          [
+            "cat",
+            1
+          ]
+        ]
+      },
+      "dog": {
+        "accuracy": 0.24,
+        "correct": 6,
+        "total": 25,
+        "top_confused": [
+          [
+            "horse",
+            9
+          ],
+          [
+            "cat",
+            4
+          ],
+          [
+            "key",
+            3
+          ]
+        ]
+      },
+      "car": {
+        "accuracy": 0.88,
+        "correct": 22,
+        "total": 25,
+        "top_confused": [
+          [
+            "truck",
+            3
+          ]
+        ]
+      },
+      "cat": {
+        "accuracy": 0.8,
+        "correct": 20,
+        "total": 25,
+        "top_confused": [
+          [
+            "horse",
+            2
+          ],
+          [
+            "banana",
+            1
+          ],
+          [
+            "dog",
+            1
+          ]
+        ]
+      },
+      "pizza": {
+        "accuracy": 0.92,
+        "correct": 23,
+        "total": 25,
+        "top_confused": [
+          [
+            "banana",
+            1
+          ],
+          [
+            "key",
+            1
+          ]
+        ]
+      },
+      "scissors": {
+        "accuracy": 0.76,
+        "correct": 19,
+        "total": 25,
+        "top_confused": [
+          [
+            "key",
+            3
+          ],
+          [
+            "banana",
+            2
+          ],
+          [
+            "car",
+            1
+          ]
+        ]
+      },
+      "banana": {
+        "accuracy": 0.92,
+        "correct": 23,
+        "total": 25,
+        "top_confused": [
+          [
+            "key",
+            1
+          ],
+          [
+            "dog",
+            1
+          ]
+        ]
+      },
+      "key": {
+        "accuracy": 0.96,
+        "correct": 24,
+        "total": 25,
+        "top_confused": [
+          [
+            "banana",
+            1
+          ]
+        ]
+      }
+    },
+    "overall_acc": 0.812,
+    "volatility": {
+      "triangle": {
+        "acc_mean": 0.9866666666666667,
+        "acc_std": 0.026666666666666658,
+        "acc_min": 0.9333333333333333,
+        "acc_max": 1.0
+      },
+      "truck": {
+        "acc_mean": 0.5200000000000001,
+        "acc_std": 0.17838784213679534,
+        "acc_min": 0.2,
+        "acc_max": 0.8
+      },
+      "horse": {
+        "acc_mean": 0.7666666666666666,
+        "acc_std": 0.08819171036881972,
+        "acc_min": 0.6666666666666666,
+        "acc_max": 0.9333333333333333
+      },
+      "dog": {
+        "acc_mean": 0.3533333333333334,
+        "acc_std": 0.13515423288475528,
+        "acc_min": 0.13333333333333333,
+        "acc_max": 0.5333333333333333
+      },
+      "car": {
+        "acc_mean": 0.6799999999999999,
+        "acc_std": 0.1359738536958076,
+        "acc_min": 0.3333333333333333,
+        "acc_max": 0.8666666666666667
+      },
+      "cat": {
+        "acc_mean": 0.7966666666666666,
+        "acc_std": 0.08812869377601526,
+        "acc_min": 0.6666666666666666,
+        "acc_max": 1.0
+      },
+      "pizza": {
+        "acc_mean": 0.9700000000000001,
+        "acc_std": 0.03316624790355399,
+        "acc_min": 0.9333333333333333,
+        "acc_max": 1.0
+      },
+      "scissors": {
+        "acc_mean": 0.8066666666666666,
+        "acc_std": 0.08406346808612329,
+        "acc_min": 0.6,
+        "acc_max": 1.0
+      },
+      "banana": {
+        "acc_mean": 0.9066666666666668,
+        "acc_std": 0.06463573143221771,
+        "acc_min": 0.8,
+        "acc_max": 1.0
+      },
+      "key": {
+        "acc_mean": 0.8466666666666669,
+        "acc_std": 0.10974718422102886,
+        "acc_min": 0.4666666666666667,
+        "acc_max": 1.0
+      }
+    },
+    "novel_eval": {
+      "accuracy": 0.48,
+      "correct": 12,
+      "total_queries": 25,
+      "nearest_base": "banana",
+      "nearest_dist": 7.712396621704102,
+      "confusion": {
+        "banana": 10,
+        "key": 2,
+        "pizza": 1
+      }
+    }
+  }
+}

@@ -204,30 +204,6 @@ class AnalyticsEngine:
         self._b64_cache = {}
         self._coact_cache = {}
 
-    def _project_hd_to_2d(self, new_hd: np.ndarray) -> np.ndarray:
-        """Project HD embeddings into current 2D space.
-
-        Uses reducer.transform when available. If a session restored only 2D
-        coordinates (no fitted reducer), fall back to a k-NN barycentric
-        projection in HD space to keep current layout stable.
-        """
-        if self._umap_reducer is not None:
-            return self._umap_reducer.transform(new_hd)
-
-        if self.embeddings_hd is None or self.embeddings_2d is None or len(self.embeddings_hd) == 0:
-            return np.zeros((len(new_hd), 2), dtype=float)
-
-        d = cdist(new_hd, self.embeddings_hd, metric='euclidean')
-        k = min(8, d.shape[1])
-        nn = np.argpartition(d, kth=k - 1, axis=1)[:, :k]
-        nn_d = np.take_along_axis(d, nn, axis=1)
-
-        w = 1.0 / (nn_d + 1e-8)
-        w /= w.sum(axis=1, keepdims=True)
-
-        nn_xy = self.embeddings_2d[nn]
-        return np.einsum('nk,nkd->nd', w, nn_xy)
-
 
     # ------------------------------------------------------------------
     # Persistence — session
@@ -350,8 +326,8 @@ class AnalyticsEngine:
                 all_embs.append(self._encoder(tensors).cpu().numpy())
         new_hd = np.concatenate(all_embs, axis=0)
 
-        # Project into existing 2D space (works with or without a fitted reducer).
-        new_2d = self._project_hd_to_2d(new_hd)
+        # Project into existing 2D UMAP space
+        new_2d = self._umap_reducer.transform(new_hd)
 
         # Append to all arrays
         self.images.extend(new_images)
@@ -445,8 +421,8 @@ class AnalyticsEngine:
                 all_embs.append(self._encoder(tensors).cpu().numpy())
         new_hd = np.concatenate(all_embs, axis=0)
 
-        # Project into existing 2D space (works with or without a fitted reducer).
-        new_2d = self._project_hd_to_2d(new_hd)
+        # Project into existing 2D space using the fitted UMAP reducer
+        new_2d = self._umap_reducer.transform(new_hd)
 
         # Append to all arrays
         start_idx = len(self.images)
@@ -665,7 +641,7 @@ class AnalyticsEngine:
 
         return results
 
-    def support_loo_delta(self, cname: str, idx: int, sc: Dict, temp: float = 1.0, base_res: Dict | None = None) -> float:
+    def support_loo_delta(self, cname: str, idx: int, sc: Dict, temp: float = 1.0) -> float:
         """
         Compute LOO delta for a single support image.
         """
@@ -673,7 +649,7 @@ class AnalyticsEngine:
         if len(items) <= 1:
             return 0.0
 
-        base_res = base_res or self.classify(sc, temp)
+        base_res = self.classify(sc, temp)
         base_acc = base_res["overall"]
 
         loo_sc = {c: list(v) for c, v in sc.items()}
@@ -725,14 +701,13 @@ class AnalyticsEngine:
 
         return results
 
-    def candidate_add_delta(self, cname: str, cand_idx: int, sc: Dict, temp: float = 1.0, base_res: Dict | None = None) -> dict:
-        base_res  = base_res or self.classify(sc, temp)
+    def candidate_add_delta(self, cname: str, cand_idx: int, sc: Dict, temp: float = 1.0) -> dict:
+        base_res  = self.classify(sc, temp)
         trial_sc  = {c: list(v) for c, v in sc.items()}
         trial_sc[cname] = trial_sc.get(cname, []) + [{"idx": cand_idx, "weight": 1.0}]
         trial_res = self.classify(trial_sc, temp)
 
         overall_delta = float(trial_res["overall"] - base_res["overall"])
-        own_delta = float(trial_res["accs"].get(cname, 0.0) - base_res["accs"].get(cname, 0.0))
 
         # Per-class deltas for all OTHER classes
         other_deltas = {
@@ -745,7 +720,6 @@ class AnalyticsEngine:
 
         return {
             "overall":           overall_delta,
-            "own":               own_delta,
             "most_affected_cls": most_affected,
             "most_affected_val": other_deltas[most_affected] if most_affected else 0.0,
         }
@@ -981,8 +955,7 @@ class AnalyticsEngine:
     def exclude_image(self, idx: int) -> Optional[int]:
         """Exclude an image by index and load a replacement if possible.
         
-        Exclusion is staged in-memory in self.excluded_indices.
-        Persistence to excluded_images.json happens on explicit save.
+        Saves relative path to excluded_images.json.
         Returns the index of the newly added replacement image, or None.
         """
         if idx >= len(self.image_paths):
@@ -993,23 +966,25 @@ class AnalyticsEngine:
             rel_path = str(path.relative_to(_DATA_DIR))
         except ValueError:
             return None
-
-        # Stage exclusion in-memory only.
+            
+        # Save to file
+        excluded = set()
+        if _EXCLUDED_PATH.exists():
+            try:
+                with open(_EXCLUDED_PATH) as f:
+                    excluded = set(json.load(f))
+            except Exception:
+                pass
+        
+        excluded.add(rel_path)
+        try:
+            with open(_EXCLUDED_PATH, 'w') as f:
+                json.dump(list(excluded), f)
+        except Exception as e:
+            logger.warning("Failed to save excluded_images.json: %s", e)
+            return None
+            
         self.excluded_indices.add(idx)
-
-        excluded_rel_paths = {rel_path}
-        for ex_idx in self.excluded_indices:
-            if isinstance(ex_idx, int) and ex_idx < len(self.image_paths):
-                try:
-                    ex_rel = str(self.image_paths[ex_idx].relative_to(_DATA_DIR))
-                    excluded_rel_paths.add(ex_rel)
-                except ValueError:
-                    pass
-            elif isinstance(ex_idx, str):
-                # Session restore can provide path strings; keep them as exclusions.
-                excluded_rel_paths.add(ex_idx)
-                excluded_rel_paths.add(ex_idx.replace("\\", "/"))
-                excluded_rel_paths.add(ex_idx.replace("/", "\\"))
         
         # Load replacement
         cname = self.class_names[self.labels[idx]]
@@ -1023,7 +998,7 @@ class AnalyticsEngine:
         replacement_file = None
         for f in img_files:
             rel = str(f.relative_to(_DATA_DIR))
-            if str(f) not in loaded_paths and rel not in excluded_rel_paths:
+            if str(f) not in loaded_paths and rel not in excluded:
                 replacement_file = f
                 break
                 
@@ -1036,7 +1011,7 @@ class AnalyticsEngine:
                 tensor = self._transform(Image.fromarray(arr.astype(np.uint8), mode='L')).unsqueeze(0)
                 new_hd = self._encoder(tensor).cpu().numpy()
             
-            new_2d = self._project_hd_to_2d(new_hd)
+            new_2d = self._umap_reducer.transform(new_hd)
             
             # Append to memory arrays
             self.images.append(arr)
